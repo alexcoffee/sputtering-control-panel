@@ -43,6 +43,39 @@ function(scp_add_module module_dir target_name)
     pico_add_extra_outputs(${target_name})
 endfunction()
 
+function(scp_add_module_ide_target module_name)
+    file(GLOB module_sources CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/${module_name}/src/*.c
+    )
+
+    # IDE-only target so CLion can index non-selected modules and provide code assistance.
+    add_library(scp_${module_name}_ide OBJECT EXCLUDE_FROM_ALL
+        ${module_sources}
+    )
+
+    target_include_directories(scp_${module_name}_ide PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/${module_name}/include
+    )
+
+    target_link_libraries(scp_${module_name}_ide PRIVATE
+        scp_shared
+        pico_stdlib
+    )
+
+    if(module_name STREQUAL "pirani" OR module_name STREQUAL "ion_gauge")
+        target_include_directories(scp_${module_name}_ide PRIVATE
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/lv_drivers
+        )
+
+        target_link_libraries(scp_${module_name}_ide PRIVATE
+            hardware_adc
+            hardware_spi
+            hardware_pwm
+        )
+    endif()
+endfunction()
+
 set(SCP_ALL_MODULES
     pirani
     ion_gauge
@@ -64,4 +97,10 @@ else()
     endif()
 
     scp_add_module(${CMAKE_CURRENT_SOURCE_DIR}/${SCP_MODULE_TARGET} scp_${SCP_MODULE_TARGET})
+
+    foreach(module_name IN LISTS SCP_ALL_MODULES)
+        if(NOT module_name STREQUAL SCP_MODULE_TARGET)
+            scp_add_module_ide_target(${module_name})
+        endif()
+    endforeach()
 endif()

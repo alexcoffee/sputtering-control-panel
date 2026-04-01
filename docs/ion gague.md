@@ -1,3 +1,8 @@
+# AIGX-S-NW25
+![img.png](assets/ion-gauge.png)
+
+The ION Gauge is used to measure the pressure of the chamber when it reaches low pressure.
+
 The gauge should not be operated at pressures higher than 50 mTorr
 You must degas the AIGX regularly. Failure to do so will affect the performance and reduce the lifetime of the
 gauge.
@@ -14,4 +19,8 @@ Activity
 
 Gauge on = solid
 Degas on = blinking
+
+
+Converting voltage to pressure
+![img_1.png](assets/ion-gauge-adc.png)
 

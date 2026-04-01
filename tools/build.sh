@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-MODULE="${1:-roughing_pump}"
+MODULE="${1:-ion_gauge}"
 BUILD_DIR="./cmake-build-debug-eabi/"
 
 export PICO_SDK_PATH="${PICO_SDK_PATH:-$(pwd)/pico-sdk}"

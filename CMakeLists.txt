@@ -22,7 +22,7 @@ pico_sdk_init()
 add_subdirectory(bsp/pico)
 add_subdirectory(shared)
 
-if(SCP_BUILD_ALL_MODULES OR SCP_MODULE_TARGET STREQUAL "pirani")
+if(SCP_BUILD_ALL_MODULES OR SCP_MODULE_TARGET STREQUAL "pirani" OR SCP_MODULE_TARGET STREQUAL "ion_gauge")
     add_subdirectory(lvgl)
     target_include_directories(lvgl SYSTEM PUBLIC
         ${CMAKE_SOURCE_DIR}
