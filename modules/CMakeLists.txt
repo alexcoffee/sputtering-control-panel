@@ -22,7 +22,11 @@ function(scp_add_module module_dir target_name)
         target_sources(${target_name} PRIVATE
             ${CMAKE_SOURCE_DIR}/lv_drivers/display/GC9A01.c
         )
+    endif()
 
+    if(target_name STREQUAL "scp_pirani"
+        OR target_name STREQUAL "scp_ion_gauge"
+        OR target_name STREQUAL "scp_data_logger")
         target_include_directories(${target_name} PRIVATE
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/lv_drivers
@@ -62,7 +66,9 @@ function(scp_add_module_ide_target module_name)
         pico_stdlib
     )
 
-    if(module_name STREQUAL "pirani" OR module_name STREQUAL "ion_gauge")
+    if(module_name STREQUAL "pirani"
+        OR module_name STREQUAL "ion_gauge"
+        OR module_name STREQUAL "data_logger")
         target_include_directories(scp_${module_name}_ide PRIVATE
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/lv_drivers
@@ -80,6 +86,7 @@ set(SCP_ALL_MODULES
     pirani
     ion_gauge
     roughing_pump
+    data_logger
 )
 
 if(NOT DEFINED SCP_BUILD_ALL_MODULES)
