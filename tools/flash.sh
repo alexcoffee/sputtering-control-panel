@@ -27,12 +27,12 @@ canonical_path() {
     printf '%s/%s\n' "${dir}" "$(basename "${path}")"
 }
 
-MODULE="${1:-roughing_pump}"
+MODULE="${1:-monitor}"
 if [[ -n "${1:-}" ]]; then
     if [[ "$1" == "$0" ]]; then
-        MODULE="roughing_pump"
+        MODULE="monitor"
     elif [[ -e "$1" ]] && [[ "$(canonical_path "$1")" == "$(canonical_path "$0")" ]]; then
-        MODULE="roughing_pump"
+        MODULE="monitor"
     else
         MODULE="$(extract_module_name "$1")"
     fi

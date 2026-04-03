@@ -47,7 +47,7 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SCP_GPIO_SIGNAL_CONNECTION_ACTIVITY, 15},
 
     {SCP_GPIO_SIGNAL_LCD_SPI_SCK, 2},
-    {SCP_GPIO_SIGNAL_LCD_SPI_TX, 3},
+    {SCP_GPIO_SIGNAL_LCD_SDI, 3},
     {SCP_GPIO_SIGNAL_LCD_COMMAND, 4},
     {SCP_GPIO_SIGNAL_LCD_SPI_CSN, 5},
     {SCP_GPIO_SIGNAL_LCD_RESET, 6},
@@ -104,7 +104,7 @@ int main(void) {
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_OK, &connection_ok_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_ACTIVITY, &connection_activity_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_SCK, &lcd_spi_sck_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_TX, &lcd_spi_tx_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SDI, &lcd_spi_tx_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_CSN, &lcd_spi_csn_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_COMMAND, &lcd_command_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_RESET, &lcd_reset_gpio)
