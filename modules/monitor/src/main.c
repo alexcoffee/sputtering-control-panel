@@ -26,6 +26,9 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SCP_GPIO_SIGNAL_TOUCH_SDI, 11},
     {SCP_GPIO_SIGNAL_TOUCH_SDO, 12},
     {SCP_GPIO_SIGNAL_TOUCH_IRQ, 13},
+    {SCP_GPIO_SIGNAL_SWITCH_A, 14},
+    {SCP_GPIO_SIGNAL_SWITCH_B, 15},
+    {SCP_GPIO_SIGNAL_SWITCH_ENABLE, 16},
 };
 
 const scp_module_config_t g_module_config = {
@@ -99,6 +102,9 @@ int main(void) {
     uint8_t touch_spi_rx_gpio;
     uint8_t touch_spi_csn_gpio;
     uint8_t touch_irq_gpio;
+    uint8_t encoder_a_gpio;
+    uint8_t encoder_b_gpio;
+    uint8_t encoder_button_gpio;
     uint8_t lcd_spi_index;
     uint8_t touch_spi_index;
 
@@ -121,7 +127,10 @@ int main(void) {
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SDI, &touch_spi_tx_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SDO, &touch_spi_rx_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SPI_CSN, &touch_spi_csn_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_IRQ, &touch_irq_gpio)) {
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_IRQ, &touch_irq_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_A, &encoder_a_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_B, &encoder_b_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_ENABLE, &encoder_button_gpio)) {
         printf("%s pin map error: missing required signal\n", g_module_config.module_name);
         return 1;
     }
@@ -178,6 +187,9 @@ int main(void) {
         .touch_spi_rx_pin = touch_spi_rx_gpio,
         .touch_spi_csn_pin = touch_spi_csn_gpio,
         .touch_irq_pin = touch_irq_gpio,
+        .encoder_a_pin = encoder_a_gpio,
+        .encoder_b_pin = encoder_b_gpio,
+        .encoder_button_pin = encoder_button_gpio,
     };
     touch_calibrator_display_init(&lcd_pins);
 

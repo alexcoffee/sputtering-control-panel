@@ -13,9 +13,15 @@
 #include "scp/module_runtime.h"
 #include "scp/protocol.h"
 
+extern char __flash_binary_end;
+extern const uint32_t monitor_jar_splash_rgb565_width;
+extern const uint32_t monitor_jar_splash_rgb565_height;
+extern const uint16_t monitor_jar_splash_rgb565[];
+
 /* AliExpress module specs: 3.5" 480x320 SPI TFT (ILI9488) + ADS7843/XPT2046 touch. */
-#define TOUCH_CALIBRATOR_DISP_HOR_RES 480
-#define TOUCH_CALIBRATOR_DISP_VER_RES 320
+#define TOUCH_CALIBRATOR_DISP_HOR_RES 320
+#define TOUCH_CALIBRATOR_DISP_VER_RES 480
+#define TOUCH_CALIBRATOR_DRAW_BUF_LINES 40
 
 #define ILI9488_CMD_MODE 0
 #define ILI9488_DATA_MODE 1
@@ -41,15 +47,17 @@
 #define MONITOR_EVENT_MAX_LINES 14U
 #define MONITOR_EVENT_LINE_CHARS 96U
 #define MONITOR_EVENT_TEXT_CHARS ((MONITOR_EVENT_MAX_LINES * MONITOR_EVENT_LINE_CHARS) + MONITOR_EVENT_MAX_LINES + 1U)
+#define MONITOR_TAB_COUNT 3U
 
 #define MONITOR_HEARTBEAT_WINDOW 0x80U
 #define MONITOR_HEARTBEAT_TIMEOUT_MS (SCP_HEARTBEAT_PERIOD * 3U)
+#define MONITOR_ENCODER_DEBOUNCE_MS 8U
 
 #define TOUCH_DEFAULT_RAW_MIN 200U
 #define TOUCH_DEFAULT_RAW_MAX 3800U
 
 #define TOUCH_CAL_FLASH_MAGIC 0x434C4254u /* "TBLC" */
-#define TOUCH_CAL_FLASH_VERSION 1u
+#define TOUCH_CAL_FLASH_VERSION 3u
 #define TOUCH_CAL_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 
 typedef struct {
@@ -106,6 +114,7 @@ static lv_obj_t *s_connections_list;
 static lv_obj_t *s_connections_empty_label;
 static lv_obj_t *s_event_log_label;
 static lv_obj_t *s_settings_status_label;
+static lv_obj_t *s_brightness_value_label;
 
 static lv_obj_t *s_calibration_root;
 static lv_obj_t *s_instruction_label;
@@ -127,6 +136,18 @@ static uint32_t s_capture_sum_y;
 static uint16_t s_capture_samples;
 static lv_point_t s_last_touch_point;
 
+static bool s_encoder_available;
+static uint8_t s_encoder_a_pin;
+static uint8_t s_encoder_b_pin;
+static uint8_t s_encoder_button_pin;
+static uint8_t s_encoder_prev_ab_state;
+static int8_t s_encoder_transition_accumulator;
+static int16_t s_encoder_step_delta;
+static bool s_encoder_button_raw_pressed;
+static bool s_encoder_button_debounced_pressed;
+static uint32_t s_encoder_button_last_edge_ms;
+static bool s_encoder_button_click_pending;
+
 static inline void ili9488_write(uint8_t mode, uint8_t value) {
     touch_calibrator_display_spi_set_lcd_cd(mode == ILI9488_DATA_MODE);
     touch_calibrator_display_spi_write_byte(value);
@@ -142,6 +163,10 @@ static void refresh_connection_rows(uint32_t now_ms);
 static void start_calibration_session(void);
 static bool load_saved_calibration(void);
 static bool save_calibration_to_flash(void);
+static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins, uint32_t now_ms);
+static void monitor_encoder_sample(uint32_t now_ms);
+static void monitor_encoder_apply_tab_navigation(void);
+static bool ili9488_draw_splash_from_flash(void);
 
 static void ili9488_fill_color565(uint16_t color) {
     static uint8_t row_buf[TOUCH_CALIBRATOR_DISP_HOR_RES * 3];
@@ -170,6 +195,30 @@ static void ili9488_boot_test_pattern(void) {
     sleep_ms(10);
     ili9488_fill_color565(0x001FU);
     sleep_ms(10);
+}
+
+static bool ili9488_draw_splash_from_flash(void) {
+    if (monitor_jar_splash_rgb565_width != TOUCH_CALIBRATOR_DISP_HOR_RES
+        || monitor_jar_splash_rgb565_height != TOUCH_CALIBRATOR_DISP_VER_RES) {
+        return false;
+    }
+
+    static uint8_t row_buf[TOUCH_CALIBRATOR_DISP_HOR_RES * 3];
+
+    touch_calibrator_display_spi_set_lcd_cs(0);
+    ili9488_set_window(0, 0, TOUCH_CALIBRATOR_DISP_HOR_RES - 1, TOUCH_CALIBRATOR_DISP_VER_RES - 1);
+    for (size_t y = 0; y < TOUCH_CALIBRATOR_DISP_VER_RES; ++y) {
+        const uint16_t *row = &monitor_jar_splash_rgb565[y * TOUCH_CALIBRATOR_DISP_HOR_RES];
+        for (size_t x = 0; x < TOUCH_CALIBRATOR_DISP_HOR_RES; ++x) {
+            const uint16_t c = row[x];
+            row_buf[x * 3U] = (uint8_t)((((c >> 11) & 0x1FU) * 255U) / 31U);
+            row_buf[(x * 3U) + 1U] = (uint8_t)((((c >> 5) & 0x3FU) * 255U) / 63U);
+            row_buf[(x * 3U) + 2U] = (uint8_t)(((c & 0x1FU) * 255U) / 31U);
+        }
+        ili9488_write_array(ILI9488_DATA_MODE, row_buf, sizeof(row_buf));
+    }
+    touch_calibrator_display_spi_set_lcd_cs(1);
+    return true;
 }
 
 static void ili9488_set_window(int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
@@ -220,8 +269,9 @@ static void ili9488_init_panel(void) {
     ili9488_write(ILI9488_DATA_MODE, 0x41);
     ili9488_write(ILI9488_CMD_MODE, 0xC5);
     ili9488_write_array(ILI9488_DATA_MODE, power_c5, sizeof(power_c5));
+    /* Rotate panel output 90 degrees counter-clockwise (portrait). */
     ili9488_write(ILI9488_CMD_MODE, ILI9488_MADCTL);
-    ili9488_write(ILI9488_DATA_MODE, ILI9488_MADCTL_MV | ILI9488_MADCTL_MX | ILI9488_MADCTL_MY | ILI9488_MADCTL_BGR);
+    ili9488_write(ILI9488_DATA_MODE, ILI9488_MADCTL_MY | ILI9488_MADCTL_BGR);
     ili9488_write(ILI9488_CMD_MODE, ILI9488_PIXFMT);
     ili9488_write(ILI9488_DATA_MODE, 0x66);
     ili9488_write(ILI9488_CMD_MODE, 0xB0);
@@ -433,8 +483,18 @@ static void raw_to_screen_default(uint16_t raw_x, uint16_t raw_y, lv_point_t *ou
         return;
     }
 
-    out_point->x = map_axis_linear(raw_x, TOUCH_DEFAULT_RAW_MIN, TOUCH_DEFAULT_RAW_MAX, TOUCH_CALIBRATOR_DISP_HOR_RES - 1);
-    out_point->y = map_axis_linear(raw_y, TOUCH_DEFAULT_RAW_MIN, TOUCH_DEFAULT_RAW_MAX, TOUCH_CALIBRATOR_DISP_VER_RES - 1);
+    /* Panel is rotated CCW 90 degrees: default mapping must swap axes and flip Y. */
+    const lv_coord_t mapped_x = map_axis_linear(raw_y,
+                                                TOUCH_DEFAULT_RAW_MIN,
+                                                TOUCH_DEFAULT_RAW_MAX,
+                                                TOUCH_CALIBRATOR_DISP_HOR_RES - 1);
+    const lv_coord_t mapped_y = map_axis_linear(raw_x,
+                                                TOUCH_DEFAULT_RAW_MIN,
+                                                TOUCH_DEFAULT_RAW_MAX,
+                                                TOUCH_CALIBRATOR_DISP_VER_RES - 1);
+
+    out_point->x = mapped_x;
+    out_point->y = (TOUCH_CALIBRATOR_DISP_VER_RES - 1) - mapped_y;
 }
 
 static void map_raw_to_screen(uint16_t raw_x, uint16_t raw_y, lv_point_t *out_point) {
@@ -525,6 +585,136 @@ static bool save_calibration_to_flash(void) {
            && stored->version == TOUCH_CAL_FLASH_VERSION
            && stored->length == sizeof(touch_calibration_flash_record_t)
            && stored->crc32 == stored_crc;
+}
+
+static void monitor_encoder_set_tab_relative(int8_t direction) {
+    if (s_root_tabs == NULL || direction == 0) {
+        return;
+    }
+
+    const int32_t current = (int32_t)lv_tabview_get_tab_act(s_root_tabs);
+    int32_t target = current + (direction > 0 ? 1 : -1);
+    if (target < 0) {
+        target = 0;
+    }
+    if (target >= (int32_t)MONITOR_TAB_COUNT) {
+        target = (int32_t)(MONITOR_TAB_COUNT - 1U);
+    }
+
+    if (target != current) {
+        lv_tabview_set_act(s_root_tabs, (uint32_t)target, LV_ANIM_OFF);
+    }
+}
+
+static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins, uint32_t now_ms) {
+    s_encoder_available = false;
+    if (pins == NULL) {
+        return;
+    }
+
+    if (pins->encoder_a_pin > SCP_PICO_GPIO_MAX
+        || pins->encoder_b_pin > SCP_PICO_GPIO_MAX
+        || pins->encoder_button_pin > SCP_PICO_GPIO_MAX) {
+        return;
+    }
+
+    s_encoder_a_pin = pins->encoder_a_pin;
+    s_encoder_b_pin = pins->encoder_b_pin;
+    s_encoder_button_pin = pins->encoder_button_pin;
+
+    gpio_init(s_encoder_a_pin);
+    gpio_set_dir(s_encoder_a_pin, GPIO_IN);
+    gpio_pull_up(s_encoder_a_pin);
+
+    gpio_init(s_encoder_b_pin);
+    gpio_set_dir(s_encoder_b_pin, GPIO_IN);
+    gpio_pull_up(s_encoder_b_pin);
+
+    gpio_init(s_encoder_button_pin);
+    gpio_set_dir(s_encoder_button_pin, GPIO_IN);
+    gpio_pull_up(s_encoder_button_pin);
+
+    s_encoder_prev_ab_state = (uint8_t)(((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
+                                        | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
+    s_encoder_transition_accumulator = 0;
+    s_encoder_step_delta = 0;
+    s_encoder_button_raw_pressed = gpio_get(s_encoder_button_pin) == 0U;
+    s_encoder_button_debounced_pressed = s_encoder_button_raw_pressed;
+    s_encoder_button_last_edge_ms = now_ms;
+    s_encoder_button_click_pending = false;
+    s_encoder_available = true;
+}
+
+static void monitor_encoder_sample(uint32_t now_ms) {
+    if (!s_encoder_available) {
+        return;
+    }
+
+    static const int8_t transition_lut[16] = {
+        0, -1, 1, 0,
+        1, 0, 0, -1,
+        -1, 0, 0, 1,
+        0, 1, -1, 0,
+    };
+
+    const uint8_t curr_ab_state = (uint8_t)(((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
+                                            | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
+    if (curr_ab_state != s_encoder_prev_ab_state) {
+        const int8_t transition = transition_lut[(s_encoder_prev_ab_state << 2U) | curr_ab_state];
+        if (transition != 0) {
+            s_encoder_transition_accumulator += transition;
+            if (s_encoder_transition_accumulator >= 4) {
+                s_encoder_transition_accumulator = 0;
+                s_encoder_step_delta++;
+            } else if (s_encoder_transition_accumulator <= -4) {
+                s_encoder_transition_accumulator = 0;
+                s_encoder_step_delta--;
+            }
+        }
+        s_encoder_prev_ab_state = curr_ab_state;
+    }
+
+    const bool button_raw_pressed = gpio_get(s_encoder_button_pin) == 0U;
+    if (button_raw_pressed != s_encoder_button_raw_pressed) {
+        s_encoder_button_raw_pressed = button_raw_pressed;
+        s_encoder_button_last_edge_ms = now_ms;
+    }
+
+    if ((uint32_t)(now_ms - s_encoder_button_last_edge_ms) < MONITOR_ENCODER_DEBOUNCE_MS) {
+        return;
+    }
+
+    if (s_encoder_button_debounced_pressed == s_encoder_button_raw_pressed) {
+        return;
+    }
+
+    const bool was_pressed = s_encoder_button_debounced_pressed;
+    s_encoder_button_debounced_pressed = s_encoder_button_raw_pressed;
+    if (was_pressed && !s_encoder_button_debounced_pressed) {
+        s_encoder_button_click_pending = true;
+    }
+}
+
+static void monitor_encoder_apply_tab_navigation(void) {
+    if (s_mode != MONITOR_MODE_UI || s_root_tabs == NULL) {
+        s_encoder_step_delta = 0;
+        s_encoder_button_click_pending = false;
+        return;
+    }
+
+    while (s_encoder_step_delta > 0) {
+        monitor_encoder_set_tab_relative(1);
+        s_encoder_step_delta--;
+    }
+    while (s_encoder_step_delta < 0) {
+        monitor_encoder_set_tab_relative(-1);
+        s_encoder_step_delta++;
+    }
+
+    if (s_encoder_button_click_pending) {
+        monitor_encoder_set_tab_relative(1);
+        s_encoder_button_click_pending = false;
+    }
 }
 
 static int find_connection_row(uint8_t module_id) {
@@ -894,6 +1084,28 @@ static void on_start_calibration_clicked(lv_event_t *event) {
     start_calibration_session();
 }
 
+static void set_brightness_value_label(uint8_t brightness_percent) {
+    if (s_brightness_value_label == NULL) {
+        return;
+    }
+
+    char brightness_text[12];
+    (void)snprintf(brightness_text, sizeof(brightness_text), "%u%%", (unsigned int)brightness_percent);
+    lv_label_set_text(s_brightness_value_label, brightness_text);
+}
+
+static void on_brightness_slider_changed(lv_event_t *event) {
+    lv_obj_t *slider = lv_event_get_target(event);
+    if (slider == NULL) {
+        return;
+    }
+
+    const int32_t value = lv_slider_get_value(slider);
+    const uint8_t brightness_percent = value < 0 ? 0U : (uint8_t)value;
+    touch_calibrator_display_spi_set_backlight_percent(brightness_percent);
+    set_brightness_value_label(brightness_percent);
+}
+
 static void monitor_touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
     (void)indev_drv;
 
@@ -928,10 +1140,23 @@ static void build_ui(void) {
     lv_obj_set_style_bg_color(s_root_tabs, lv_color_hex(0x0D111B), 0);
     lv_obj_set_style_bg_opa(s_root_tabs, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_root_tabs, 0, 0);
+    lv_obj_t *tab_content = lv_tabview_get_content(s_root_tabs);
+    lv_obj_clear_flag(tab_content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tab_content, LV_DIR_NONE);
+    lv_obj_set_style_anim_time(tab_content, 0, 0);
 
     lv_obj_t *tab_connections = lv_tabview_add_tab(s_root_tabs, "Connections");
     lv_obj_t *tab_events = lv_tabview_add_tab(s_root_tabs, "Event Log");
     lv_obj_t *tab_settings = lv_tabview_add_tab(s_root_tabs, "Settings");
+    lv_obj_clear_flag(tab_connections, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tab_connections, LV_DIR_NONE);
+    lv_obj_set_scrollbar_mode(tab_connections, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(tab_events, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tab_events, LV_DIR_NONE);
+    lv_obj_set_scrollbar_mode(tab_events, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(tab_settings, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tab_settings, LV_DIR_NONE);
+    lv_obj_set_scrollbar_mode(tab_settings, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *conn_title = lv_label_create(tab_connections);
     lv_label_set_text(conn_title, "CAN Modules");
@@ -977,6 +1202,46 @@ static void build_ui(void) {
     lv_label_set_long_mode(s_settings_status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_settings_status_label, lv_color_hex(0xB9C8DD), 0);
     lv_label_set_text(s_settings_status_label, "Touch calibration: default mapping");
+
+    lv_obj_t *brightness_title_label = lv_label_create(tab_settings);
+    lv_label_set_text(brightness_title_label, "Brightness");
+    lv_obj_align(brightness_title_label, LV_ALIGN_TOP_LEFT, 8, 114);
+    lv_obj_set_style_text_color(brightness_title_label, lv_color_hex(0x9DB0C8), 0);
+
+    lv_obj_t *brightness_slider = lv_slider_create(tab_settings);
+    lv_obj_set_size(brightness_slider, TOUCH_CALIBRATOR_DISP_HOR_RES - 66, 18);
+    lv_obj_align(brightness_slider, LV_ALIGN_TOP_LEFT, 8, 134);
+    lv_slider_set_range(brightness_slider, 5, 100);
+    uint8_t brightness_percent = touch_calibrator_display_spi_get_backlight_percent();
+    if (brightness_percent < 5U) {
+        brightness_percent = 5U;
+        touch_calibrator_display_spi_set_backlight_percent(brightness_percent);
+    }
+    lv_slider_set_value(brightness_slider, brightness_percent, LV_ANIM_OFF);
+    lv_obj_add_event_cb(brightness_slider, on_brightness_slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_brightness_value_label = lv_label_create(tab_settings);
+    lv_obj_align(s_brightness_value_label, LV_ALIGN_TOP_RIGHT, -8, 132);
+    lv_obj_set_style_text_color(s_brightness_value_label, lv_color_hex(0xB9C8DD), 0);
+    set_brightness_value_label(brightness_percent);
+
+    lv_obj_t *flash_label = lv_label_create(tab_settings);
+    lv_obj_set_width(flash_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
+    lv_obj_align(flash_label, LV_ALIGN_TOP_LEFT, 8, 160);
+    lv_label_set_long_mode(flash_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(flash_label, lv_color_hex(0x9DB0C8), 0);
+    const uint32_t flash_total_kib = PICO_FLASH_SIZE_BYTES / 1024U;
+    const uint32_t flash_used_bytes = (uint32_t)((uintptr_t)&__flash_binary_end - XIP_BASE);
+    const uint32_t flash_free_kib = (PICO_FLASH_SIZE_BYTES > flash_used_bytes)
+                                    ? ((PICO_FLASH_SIZE_BYTES - flash_used_bytes) / 1024U)
+                                    : 0U;
+    char flash_text[96];
+    (void)snprintf(flash_text,
+                   sizeof(flash_text),
+                   "Flash: %lu KiB total, ~%lu KiB free",
+                   (unsigned long)flash_total_kib,
+                   (unsigned long)flash_free_kib);
+    lv_label_set_text(flash_label, flash_text);
 
     lv_obj_t *build_label = lv_label_create(tab_settings);
     lv_obj_set_width(build_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
@@ -1043,6 +1308,9 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     s_event_line_count = 0U;
     s_mode = MONITOR_MODE_UI;
     s_last_touch_point = (lv_point_t){0, 0};
+    s_encoder_available = false;
+    s_encoder_step_delta = 0;
+    s_encoder_button_click_pending = false;
 
     s_points[0].screen = (lv_point_t){30, 30};
     s_points[1].screen = (lv_point_t){TOUCH_CALIBRATOR_DISP_HOR_RES - 31, 30};
@@ -1051,13 +1319,21 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     s_points[4].screen = (lv_point_t){TOUCH_CALIBRATOR_DISP_HOR_RES / 2, TOUCH_CALIBRATOR_DISP_VER_RES / 2};
 
     touch_calibrator_display_spi_init(pins);
+    monitor_encoder_init(pins, to_ms_since_boot(get_absolute_time()));
     lv_init();
     ili9488_init_panel();
-    ili9488_boot_test_pattern();
+    if (ili9488_draw_splash_from_flash()) {
+        sleep_ms(5000);
+    } else {
+        ili9488_boot_test_pattern();
+    }
 
     static lv_disp_draw_buf_t draw_buf;
-    static lv_color_t draw_buf_1[TOUCH_CALIBRATOR_DISP_HOR_RES * 20];
-    lv_disp_draw_buf_init(&draw_buf, draw_buf_1, NULL, TOUCH_CALIBRATOR_DISP_HOR_RES * 20);
+    static lv_color_t draw_buf_1[TOUCH_CALIBRATOR_DISP_HOR_RES * TOUCH_CALIBRATOR_DRAW_BUF_LINES];
+    lv_disp_draw_buf_init(&draw_buf,
+                          draw_buf_1,
+                          NULL,
+                          TOUCH_CALIBRATOR_DISP_HOR_RES * TOUCH_CALIBRATOR_DRAW_BUF_LINES);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -1076,11 +1352,17 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     build_ui();
     build_calibration_view();
 
-    if (load_saved_calibration()) {
+    const bool calibration_loaded = load_saved_calibration();
+    if (calibration_loaded) {
         printf("touch calibration loaded from flash\n");
         if (s_settings_status_label != NULL) {
             lv_label_set_text(s_settings_status_label, "Touch calibration: loaded from flash");
         }
+    } else {
+        if (s_settings_status_label != NULL) {
+            lv_label_set_text(s_settings_status_label, "Touch calibration: required (new orientation)");
+        }
+        start_calibration_session();
     }
 }
 
@@ -1090,6 +1372,8 @@ void touch_calibrator_display_tick(uint32_t elapsed_ms) {
 
 void touch_calibrator_display_task_handler(void) {
     const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    monitor_encoder_sample(now_ms);
+    monitor_encoder_apply_tab_navigation();
 
     if (s_mode == MONITOR_MODE_CALIBRATION) {
         update_calibration();
