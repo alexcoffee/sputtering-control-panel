@@ -37,6 +37,7 @@ function(scp_add_module module_dir target_name)
             hardware_adc
             hardware_spi
             hardware_pwm
+            hardware_flash
         )
 
         pico_set_binary_type(${target_name} default)
@@ -78,6 +79,7 @@ function(scp_add_module_ide_target module_name)
             hardware_adc
             hardware_spi
             hardware_pwm
+            hardware_flash
         )
     endif()
 endfunction()

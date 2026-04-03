@@ -199,7 +199,7 @@ int main(void) {
         touch_calibrator_display_task_handler();
 
         if (scp_can_try_read(&can_bus, &rx_msg)) {
-            printf("RX id=0x%lx dlc=%u\n", (unsigned long)rx_msg.id, (unsigned int)rx_msg.dlc);
+            touch_calibrator_display_handle_can_message(&rx_msg, now_ms);
         }
 
         if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
