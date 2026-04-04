@@ -57,7 +57,7 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define TOUCH_DEFAULT_RAW_MAX 3800U
 
 #define TOUCH_CAL_FLASH_MAGIC 0x434C4254u /* "TBLC" */
-#define TOUCH_CAL_FLASH_VERSION 3u
+#define TOUCH_CAL_FLASH_VERSION 4u
 #define TOUCH_CAL_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 
 typedef struct {
@@ -167,6 +167,7 @@ static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins
 static void monitor_encoder_sample(uint32_t now_ms);
 static void monitor_encoder_apply_tab_navigation(void);
 static bool ili9488_draw_splash_from_flash(void);
+static void wait_for_splash_dismiss(uint32_t max_wait_ms);
 
 static void ili9488_fill_color565(uint16_t color) {
     static uint8_t row_buf[TOUCH_CALIBRATOR_DISP_HOR_RES * 3];
@@ -221,6 +222,26 @@ static bool ili9488_draw_splash_from_flash(void) {
     return true;
 }
 
+static void wait_for_splash_dismiss(uint32_t max_wait_ms) {
+    const uint32_t start_ms = to_ms_since_boot(get_absolute_time());
+    uint16_t raw_x = 0U;
+    uint16_t raw_y = 0U;
+
+    while ((uint32_t)(to_ms_since_boot(get_absolute_time()) - start_ms) < max_wait_ms) {
+        if (touch_calibrator_display_spi_touch_read_raw(&raw_x, &raw_y)) {
+            const uint32_t release_start_ms = to_ms_since_boot(get_absolute_time());
+            while (touch_calibrator_display_spi_touch_read_raw(&raw_x, &raw_y)) {
+                if ((uint32_t)(to_ms_since_boot(get_absolute_time()) - release_start_ms) >= 300U) {
+                    break;
+                }
+                sleep_ms(10);
+            }
+            return;
+        }
+        sleep_ms(15);
+    }
+}
+
 static void ili9488_set_window(int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
     uint8_t data[4];
 
@@ -269,9 +290,9 @@ static void ili9488_init_panel(void) {
     ili9488_write(ILI9488_DATA_MODE, 0x41);
     ili9488_write(ILI9488_CMD_MODE, 0xC5);
     ili9488_write_array(ILI9488_DATA_MODE, power_c5, sizeof(power_c5));
-    /* Rotate panel output 90 degrees counter-clockwise (portrait). */
+    /* Rotate panel output 180 degrees from the previous orientation (portrait, upside-down). */
     ili9488_write(ILI9488_CMD_MODE, ILI9488_MADCTL);
-    ili9488_write(ILI9488_DATA_MODE, ILI9488_MADCTL_MY | ILI9488_MADCTL_BGR);
+    ili9488_write(ILI9488_DATA_MODE, ILI9488_MADCTL_MX | ILI9488_MADCTL_BGR);
     ili9488_write(ILI9488_CMD_MODE, ILI9488_PIXFMT);
     ili9488_write(ILI9488_DATA_MODE, 0x66);
     ili9488_write(ILI9488_CMD_MODE, 0xB0);
@@ -483,7 +504,7 @@ static void raw_to_screen_default(uint16_t raw_x, uint16_t raw_y, lv_point_t *ou
         return;
     }
 
-    /* Panel is rotated CCW 90 degrees: default mapping must swap axes and flip Y. */
+    /* Panel is rotated 180 degrees from prior orientation: swap axes and flip X. */
     const lv_coord_t mapped_x = map_axis_linear(raw_y,
                                                 TOUCH_DEFAULT_RAW_MIN,
                                                 TOUCH_DEFAULT_RAW_MAX,
@@ -493,8 +514,8 @@ static void raw_to_screen_default(uint16_t raw_x, uint16_t raw_y, lv_point_t *ou
                                                 TOUCH_DEFAULT_RAW_MAX,
                                                 TOUCH_CALIBRATOR_DISP_VER_RES - 1);
 
-    out_point->x = mapped_x;
-    out_point->y = (TOUCH_CALIBRATOR_DISP_VER_RES - 1) - mapped_y;
+    out_point->x = (TOUCH_CALIBRATOR_DISP_HOR_RES - 1) - mapped_x;
+    out_point->y = mapped_y;
 }
 
 static void map_raw_to_screen(uint16_t raw_x, uint16_t raw_y, lv_point_t *out_point) {
@@ -1323,7 +1344,7 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     lv_init();
     ili9488_init_panel();
     if (ili9488_draw_splash_from_flash()) {
-        sleep_ms(5000);
+        wait_for_splash_dismiss(5000U);
     } else {
         ili9488_boot_test_pattern();
     }
