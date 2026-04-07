@@ -52,6 +52,7 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define MONITOR_HEARTBEAT_WINDOW 0x80U
 #define MONITOR_HEARTBEAT_TIMEOUT_MS (SCP_HEARTBEAT_PERIOD * 3U)
 #define MONITOR_ENCODER_DEBOUNCE_MS 8U
+#define MONITOR_ENCODER_TRANSITIONS_PER_STEP 2
 
 #define TOUCH_DEFAULT_RAW_MIN 200U
 #define TOUCH_DEFAULT_RAW_MAX 3800U
@@ -107,6 +108,11 @@ typedef enum {
     MONITOR_MODE_CALIBRATION = 1
 } monitor_mode_t;
 
+typedef struct {
+    uint8_t module_id;
+    const char *friendly_name;
+} monitor_module_name_t;
+
 static monitor_mode_t s_mode;
 
 static lv_obj_t *s_root_tabs;
@@ -148,6 +154,12 @@ static bool s_encoder_button_debounced_pressed;
 static uint32_t s_encoder_button_last_edge_ms;
 static bool s_encoder_button_click_pending;
 
+static const monitor_module_name_t s_module_names[] = {
+    {3U, "Pirani Gauge"},
+    {9U, "Roughing Pump"},
+    {11U, "Monitor"},
+};
+
 static inline void ili9488_write(uint8_t mode, uint8_t value) {
     touch_calibrator_display_spi_set_lcd_cd(mode == ILI9488_DATA_MODE);
     touch_calibrator_display_spi_write_byte(value);
@@ -159,21 +171,34 @@ static inline void ili9488_write_array(uint8_t mode, const uint8_t *data, size_t
 }
 
 static void ili9488_set_window(int32_t x1, int32_t y1, int32_t x2, int32_t y2);
+
 static void refresh_connection_rows(uint32_t now_ms);
+
 static void start_calibration_session(void);
+
 static bool load_saved_calibration(void);
+
 static bool save_calibration_to_flash(void);
+
 static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins, uint32_t now_ms);
+
 static void monitor_encoder_sample(uint32_t now_ms);
+
 static void monitor_encoder_apply_tab_navigation(void);
+
 static bool ili9488_draw_splash_from_flash(void);
+
 static void wait_for_splash_dismiss(uint32_t max_wait_ms);
+
+static const char *friendly_module_name(uint8_t module_id);
+static bool is_connection_row_online(const monitor_connection_row_t *entry, uint32_t now_ms);
+static void clear_connection_row(monitor_connection_row_t *entry);
 
 static void ili9488_fill_color565(uint16_t color) {
     static uint8_t row_buf[TOUCH_CALIBRATOR_DISP_HOR_RES * 3];
-    const uint8_t r = (uint8_t)((((color >> 11) & 0x1FU) * 255U) / 31U);
-    const uint8_t g = (uint8_t)((((color >> 5) & 0x3FU) * 255U) / 63U);
-    const uint8_t b = (uint8_t)(((color & 0x1FU) * 255U) / 31U);
+    const uint8_t r = (uint8_t) ((((color >> 11) & 0x1FU) * 255U) / 31U);
+    const uint8_t g = (uint8_t) ((((color >> 5) & 0x3FU) * 255U) / 63U);
+    const uint8_t b = (uint8_t) (((color & 0x1FU) * 255U) / 31U);
 
     for (size_t i = 0; i < TOUCH_CALIBRATOR_DISP_HOR_RES; ++i) {
         row_buf[(i * 3U)] = r;
@@ -212,9 +237,9 @@ static bool ili9488_draw_splash_from_flash(void) {
         const uint16_t *row = &monitor_jar_splash_rgb565[y * TOUCH_CALIBRATOR_DISP_HOR_RES];
         for (size_t x = 0; x < TOUCH_CALIBRATOR_DISP_HOR_RES; ++x) {
             const uint16_t c = row[x];
-            row_buf[x * 3U] = (uint8_t)((((c >> 11) & 0x1FU) * 255U) / 31U);
-            row_buf[(x * 3U) + 1U] = (uint8_t)((((c >> 5) & 0x3FU) * 255U) / 63U);
-            row_buf[(x * 3U) + 2U] = (uint8_t)(((c & 0x1FU) * 255U) / 31U);
+            row_buf[x * 3U] = (uint8_t) ((((c >> 11) & 0x1FU) * 255U) / 31U);
+            row_buf[(x * 3U) + 1U] = (uint8_t) ((((c >> 5) & 0x3FU) * 255U) / 63U);
+            row_buf[(x * 3U) + 2U] = (uint8_t) (((c & 0x1FU) * 255U) / 31U);
         }
         ili9488_write_array(ILI9488_DATA_MODE, row_buf, sizeof(row_buf));
     }
@@ -227,11 +252,11 @@ static void wait_for_splash_dismiss(uint32_t max_wait_ms) {
     uint16_t raw_x = 0U;
     uint16_t raw_y = 0U;
 
-    while ((uint32_t)(to_ms_since_boot(get_absolute_time()) - start_ms) < max_wait_ms) {
+    while ((uint32_t) (to_ms_since_boot(get_absolute_time()) - start_ms) < max_wait_ms) {
         if (touch_calibrator_display_spi_touch_read_raw(&raw_x, &raw_y)) {
             const uint32_t release_start_ms = to_ms_since_boot(get_absolute_time());
             while (touch_calibrator_display_spi_touch_read_raw(&raw_x, &raw_y)) {
-                if ((uint32_t)(to_ms_since_boot(get_absolute_time()) - release_start_ms) >= 300U) {
+                if ((uint32_t) (to_ms_since_boot(get_absolute_time()) - release_start_ms) >= 300U) {
                     break;
                 }
                 sleep_ms(10);
@@ -246,17 +271,17 @@ static void ili9488_set_window(int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
     uint8_t data[4];
 
     ili9488_write(ILI9488_CMD_MODE, ILI9488_CASET);
-    data[0] = (uint8_t)((x1 >> 8) & 0xFF);
-    data[1] = (uint8_t)(x1 & 0xFF);
-    data[2] = (uint8_t)((x2 >> 8) & 0xFF);
-    data[3] = (uint8_t)(x2 & 0xFF);
+    data[0] = (uint8_t) ((x1 >> 8) & 0xFF);
+    data[1] = (uint8_t) (x1 & 0xFF);
+    data[2] = (uint8_t) ((x2 >> 8) & 0xFF);
+    data[3] = (uint8_t) (x2 & 0xFF);
     ili9488_write_array(ILI9488_DATA_MODE, data, sizeof(data));
 
     ili9488_write(ILI9488_CMD_MODE, ILI9488_PASET);
-    data[0] = (uint8_t)((y1 >> 8) & 0xFF);
-    data[1] = (uint8_t)(y1 & 0xFF);
-    data[2] = (uint8_t)((y2 >> 8) & 0xFF);
-    data[3] = (uint8_t)(y2 & 0xFF);
+    data[0] = (uint8_t) ((y1 >> 8) & 0xFF);
+    data[1] = (uint8_t) (y1 & 0xFF);
+    data[2] = (uint8_t) ((y2 >> 8) & 0xFF);
+    data[3] = (uint8_t) (y2 & 0xFF);
     ili9488_write_array(ILI9488_DATA_MODE, data, sizeof(data));
 
     ili9488_write(ILI9488_CMD_MODE, ILI9488_RAMWR);
@@ -339,11 +364,11 @@ static void ili9488_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_col
         for (int32_t x = 0; x < act_width; ++x) {
             lv_color32_t c32;
             c32.full = lv_color_to32(row_ptr[x]);
-            line_buf[(size_t)x * 3U] = c32.ch.red;
-            line_buf[((size_t)x * 3U) + 1U] = c32.ch.green;
-            line_buf[((size_t)x * 3U) + 2U] = c32.ch.blue;
+            line_buf[(size_t) x * 3U] = c32.ch.red;
+            line_buf[((size_t) x * 3U) + 1U] = c32.ch.green;
+            line_buf[((size_t) x * 3U) + 2U] = c32.ch.blue;
         }
-        ili9488_write_array(ILI9488_DATA_MODE, line_buf, (size_t)act_width * 3U);
+        ili9488_write_array(ILI9488_DATA_MODE, line_buf, (size_t) act_width * 3U);
         row_ptr += src_width;
     }
     touch_calibrator_display_spi_set_lcd_cs(1);
@@ -356,7 +381,7 @@ static bool solve_3x3(float a[3][3], float b[3], float out[3]) {
         uint8_t pivot = col;
         float pivot_abs = a[pivot][col] >= 0.0f ? a[pivot][col] : -a[pivot][col];
 
-        for (uint8_t row = (uint8_t)(col + 1U); row < 3U; ++row) {
+        for (uint8_t row = (uint8_t) (col + 1U); row < 3U; ++row) {
             const float row_abs = a[row][col] >= 0.0f ? a[row][col] : -a[row][col];
             if (row_abs > pivot_abs) {
                 pivot = row;
@@ -412,10 +437,10 @@ static bool compute_transform(void) {
     float aty[3] = {0.0f};
 
     for (size_t i = 0; i < TOUCH_CALIBRATION_POINT_COUNT; ++i) {
-        const float u = (float)s_points[i].raw_x;
-        const float v = (float)s_points[i].raw_y;
-        const float x = (float)s_points[i].screen.x;
-        const float y = (float)s_points[i].screen.y;
+        const float u = (float) s_points[i].raw_x;
+        const float v = (float) s_points[i].raw_y;
+        const float x = (float) s_points[i].screen.x;
+        const float y = (float) s_points[i].screen.y;
 
         ata[0][0] += u * u;
         ata[0][1] += u * v;
@@ -463,26 +488,26 @@ static void raw_to_screen_calibrated(uint16_t raw_x, uint16_t raw_y, lv_point_t 
         return;
     }
 
-    const float mapped_x = (s_transform.ax * (float)raw_x) + (s_transform.bx * (float)raw_y) + s_transform.cx;
-    const float mapped_y = (s_transform.ay * (float)raw_x) + (s_transform.by * (float)raw_y) + s_transform.cy;
+    const float mapped_x = (s_transform.ax * (float) raw_x) + (s_transform.bx * (float) raw_y) + s_transform.cx;
+    const float mapped_y = (s_transform.ay * (float) raw_x) + (s_transform.by * (float) raw_y) + s_transform.cy;
 
     float clamped_x = mapped_x;
     float clamped_y = mapped_y;
     if (clamped_x < 0.0f) {
         clamped_x = 0.0f;
     }
-    if (clamped_x > (float)(TOUCH_CALIBRATOR_DISP_HOR_RES - 1)) {
-        clamped_x = (float)(TOUCH_CALIBRATOR_DISP_HOR_RES - 1);
+    if (clamped_x > (float) (TOUCH_CALIBRATOR_DISP_HOR_RES - 1)) {
+        clamped_x = (float) (TOUCH_CALIBRATOR_DISP_HOR_RES - 1);
     }
     if (clamped_y < 0.0f) {
         clamped_y = 0.0f;
     }
-    if (clamped_y > (float)(TOUCH_CALIBRATOR_DISP_VER_RES - 1)) {
-        clamped_y = (float)(TOUCH_CALIBRATOR_DISP_VER_RES - 1);
+    if (clamped_y > (float) (TOUCH_CALIBRATOR_DISP_VER_RES - 1)) {
+        clamped_y = (float) (TOUCH_CALIBRATOR_DISP_VER_RES - 1);
     }
 
-    out_point->x = (lv_coord_t)(clamped_x + 0.5f);
-    out_point->y = (lv_coord_t)(clamped_y + 0.5f);
+    out_point->x = (lv_coord_t) (clamped_x + 0.5f);
+    out_point->y = (lv_coord_t) (clamped_y + 0.5f);
 }
 
 static lv_coord_t map_axis_linear(uint16_t raw, uint16_t raw_min, uint16_t raw_max, lv_coord_t screen_max) {
@@ -493,10 +518,10 @@ static lv_coord_t map_axis_linear(uint16_t raw, uint16_t raw_min, uint16_t raw_m
         return screen_max;
     }
 
-    const uint32_t span_raw = (uint32_t)raw_max - (uint32_t)raw_min;
-    const uint32_t normalized = (uint32_t)raw - (uint32_t)raw_min;
-    const uint32_t mapped = (normalized * (uint32_t)screen_max) / span_raw;
-    return (lv_coord_t)mapped;
+    const uint32_t span_raw = (uint32_t) raw_max - (uint32_t) raw_min;
+    const uint32_t normalized = (uint32_t) raw - (uint32_t) raw_min;
+    const uint32_t mapped = (normalized * (uint32_t) screen_max) / span_raw;
+    return (lv_coord_t) mapped;
 }
 
 static void raw_to_screen_default(uint16_t raw_x, uint16_t raw_y, lv_point_t *out_point) {
@@ -529,9 +554,9 @@ static void map_raw_to_screen(uint16_t raw_x, uint16_t raw_y, lv_point_t *out_po
 static uint32_t crc32_compute(const uint8_t *data, size_t length) {
     uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < length; ++i) {
-        crc ^= (uint32_t)data[i];
+        crc ^= (uint32_t) data[i];
         for (uint8_t bit = 0; bit < 8U; ++bit) {
-            const uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
+            const uint32_t mask = (uint32_t) -(int32_t) (crc & 1u);
             crc = (crc >> 1U) ^ (0xEDB88320u & mask);
         }
     }
@@ -554,7 +579,7 @@ static void apply_calibration_record(const touch_calibration_flash_record_t *rec
 
 static bool load_saved_calibration(void) {
     const touch_calibration_flash_record_t *record =
-            (const touch_calibration_flash_record_t *)(XIP_BASE + TOUCH_CAL_FLASH_OFFSET);
+            (const touch_calibration_flash_record_t *) (XIP_BASE + TOUCH_CAL_FLASH_OFFSET);
 
     if (record->magic != TOUCH_CAL_FLASH_MAGIC
         || record->version != TOUCH_CAL_FLASH_VERSION
@@ -562,7 +587,7 @@ static bool load_saved_calibration(void) {
         return false;
     }
 
-    const uint32_t expected_crc = crc32_compute((const uint8_t *)record,
+    const uint32_t expected_crc = crc32_compute((const uint8_t *) record,
                                                 offsetof(touch_calibration_flash_record_t, crc32));
     if (record->crc32 != expected_crc) {
         return false;
@@ -585,7 +610,7 @@ static bool save_calibration_to_flash(void) {
         .cy = s_transform.cy,
         .crc32 = 0U,
     };
-    record.crc32 = crc32_compute((const uint8_t *)&record,
+    record.crc32 = crc32_compute((const uint8_t *) &record,
                                  offsetof(touch_calibration_flash_record_t, crc32));
 
     uint8_t page_buf[FLASH_PAGE_SIZE];
@@ -598,8 +623,8 @@ static bool save_calibration_to_flash(void) {
     restore_interrupts(irq_state);
 
     const touch_calibration_flash_record_t *stored =
-            (const touch_calibration_flash_record_t *)(XIP_BASE + TOUCH_CAL_FLASH_OFFSET);
-    const uint32_t stored_crc = crc32_compute((const uint8_t *)stored,
+            (const touch_calibration_flash_record_t *) (XIP_BASE + TOUCH_CAL_FLASH_OFFSET);
+    const uint32_t stored_crc = crc32_compute((const uint8_t *) stored,
                                               offsetof(touch_calibration_flash_record_t, crc32));
 
     return stored->magic == TOUCH_CAL_FLASH_MAGIC
@@ -613,17 +638,17 @@ static void monitor_encoder_set_tab_relative(int8_t direction) {
         return;
     }
 
-    const int32_t current = (int32_t)lv_tabview_get_tab_act(s_root_tabs);
+    const int32_t current = (int32_t) lv_tabview_get_tab_act(s_root_tabs);
     int32_t target = current + (direction > 0 ? 1 : -1);
     if (target < 0) {
         target = 0;
     }
-    if (target >= (int32_t)MONITOR_TAB_COUNT) {
-        target = (int32_t)(MONITOR_TAB_COUNT - 1U);
+    if (target >= (int32_t) MONITOR_TAB_COUNT) {
+        target = (int32_t) (MONITOR_TAB_COUNT - 1U);
     }
 
     if (target != current) {
-        lv_tabview_set_act(s_root_tabs, (uint32_t)target, LV_ANIM_OFF);
+        lv_tabview_set_act(s_root_tabs, (uint32_t) target, LV_ANIM_OFF);
     }
 }
 
@@ -655,8 +680,8 @@ static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins
     gpio_set_dir(s_encoder_button_pin, GPIO_IN);
     gpio_pull_up(s_encoder_button_pin);
 
-    s_encoder_prev_ab_state = (uint8_t)(((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
-                                        | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
+    s_encoder_prev_ab_state = (uint8_t) (((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
+                                         | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
     s_encoder_transition_accumulator = 0;
     s_encoder_step_delta = 0;
     s_encoder_button_raw_pressed = gpio_get(s_encoder_button_pin) == 0U;
@@ -678,16 +703,16 @@ static void monitor_encoder_sample(uint32_t now_ms) {
         0, 1, -1, 0,
     };
 
-    const uint8_t curr_ab_state = (uint8_t)(((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
-                                            | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
+    const uint8_t curr_ab_state = (uint8_t) (((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
+                                             | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
     if (curr_ab_state != s_encoder_prev_ab_state) {
         const int8_t transition = transition_lut[(s_encoder_prev_ab_state << 2U) | curr_ab_state];
         if (transition != 0) {
             s_encoder_transition_accumulator += transition;
-            if (s_encoder_transition_accumulator >= 4) {
+            if (s_encoder_transition_accumulator >= MONITOR_ENCODER_TRANSITIONS_PER_STEP) {
                 s_encoder_transition_accumulator = 0;
                 s_encoder_step_delta++;
-            } else if (s_encoder_transition_accumulator <= -4) {
+            } else if (s_encoder_transition_accumulator <= -MONITOR_ENCODER_TRANSITIONS_PER_STEP) {
                 s_encoder_transition_accumulator = 0;
                 s_encoder_step_delta--;
             }
@@ -701,7 +726,7 @@ static void monitor_encoder_sample(uint32_t now_ms) {
         s_encoder_button_last_edge_ms = now_ms;
     }
 
-    if ((uint32_t)(now_ms - s_encoder_button_last_edge_ms) < MONITOR_ENCODER_DEBOUNCE_MS) {
+    if ((uint32_t) (now_ms - s_encoder_button_last_edge_ms) < MONITOR_ENCODER_DEBOUNCE_MS) {
         return;
     }
 
@@ -741,29 +766,68 @@ static void monitor_encoder_apply_tab_navigation(void) {
 static int find_connection_row(uint8_t module_id) {
     for (size_t i = 0; i < MONITOR_MAX_CONNECTION_ROWS; ++i) {
         if (s_connection_rows[i].used && s_connection_rows[i].module_id == module_id) {
-            return (int)i;
+            return (int) i;
         }
     }
     return -1;
+}
+
+static const char *friendly_module_name(uint8_t module_id) {
+    for (size_t i = 0; i < (sizeof(s_module_names) / sizeof(s_module_names[0])); ++i) {
+        if (s_module_names[i].module_id == module_id) {
+            return s_module_names[i].friendly_name;
+        }
+    }
+    return NULL;
+}
+
+static bool is_connection_row_online(const monitor_connection_row_t *entry, uint32_t now_ms) {
+    return entry != NULL
+           && entry->used
+           && entry->heartbeat_seen
+           && ((now_ms - entry->last_heartbeat_ms) <= MONITOR_HEARTBEAT_TIMEOUT_MS);
+}
+
+static void clear_connection_row(monitor_connection_row_t *entry) {
+    if (entry == NULL || !entry->used) {
+        return;
+    }
+
+    if (entry->row != NULL) {
+        lv_obj_del(entry->row);
+    }
+    memset(entry, 0, sizeof(*entry));
+}
+
+
+static lv_color_t online_status_dot_color(uint8_t module_id) {
+    switch (module_id) {
+    case 3U:  /* Pirani */
+        return lv_color_hex(~0xBF745E); /* orange */
+    case 9U:  /* Roughing pump */
+        return lv_color_hex(~0x22C55E); /* green */
+    default:
+        return lv_color_hex(~0x5BE37D); /* default online green */
+    }
 }
 
 static void update_connection_row_visual(monitor_connection_row_t *entry, uint32_t now_ms) {
     if (entry == NULL || !entry->used || entry->icon == NULL || entry->text == NULL) {
         return;
     }
+    (void) now_ms;
 
-    const bool online = entry->heartbeat_seen
-                        && ((now_ms - entry->last_heartbeat_ms) <= MONITOR_HEARTBEAT_TIMEOUT_MS);
-    lv_label_set_text(entry->icon, online ? LV_SYMBOL_LOOP : LV_SYMBOL_STOP);
-    lv_obj_set_style_text_color(entry->icon,
-                                online ? lv_color_hex(0x5BE37D) : lv_color_hex(0x657080),
-                                0);
+    lv_obj_set_style_bg_opa(entry->icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(entry->icon,
+                              online_status_dot_color(entry->module_id),
+                              0);
 
-    char text[48];
-    if (!entry->heartbeat_seen) {
-        (void)snprintf(text, sizeof(text), "Module %u  (seen, no heartbeat)", (unsigned int)entry->module_id);
+    const char *name = friendly_module_name(entry->module_id);
+    char text[80];
+    if (name != NULL) {
+        (void) snprintf(text, sizeof(text), "%s", name);
     } else {
-        (void)snprintf(text, sizeof(text), "Module %u  (%s)", (unsigned int)entry->module_id, online ? "online" : "offline");
+        (void) snprintf(text, sizeof(text), "Module %u", (unsigned int) entry->module_id);
     }
     lv_label_set_text(entry->text, text);
 }
@@ -793,7 +857,12 @@ static int ensure_connection_row(uint8_t module_id) {
             lv_obj_set_style_radius(entry->row, 8, 0);
             lv_obj_set_style_pad_all(entry->row, 8, 0);
 
-            entry->icon = lv_label_create(entry->row);
+            entry->icon = lv_obj_create(entry->row);
+            lv_obj_set_size(entry->icon, 12, 12);
+            lv_obj_set_style_radius(entry->icon, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_border_width(entry->icon, 0, 0);
+            lv_obj_set_style_pad_all(entry->icon, 0, 0);
+            lv_obj_clear_flag(entry->icon, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_align(entry->icon, LV_ALIGN_LEFT_MID, 0, 0);
 
             entry->text = lv_label_create(entry->row);
@@ -804,7 +873,7 @@ static int ensure_connection_row(uint8_t module_id) {
         if (s_connections_empty_label != NULL) {
             lv_obj_add_flag(s_connections_empty_label, LV_OBJ_FLAG_HIDDEN);
         }
-        return (int)i;
+        return (int) i;
     }
 
     return -1;
@@ -814,6 +883,10 @@ static void refresh_connection_rows(uint32_t now_ms) {
     bool any = false;
     for (size_t i = 0; i < MONITOR_MAX_CONNECTION_ROWS; ++i) {
         if (!s_connection_rows[i].used) {
+            continue;
+        }
+        if (!is_connection_row_online(&s_connection_rows[i], now_ms)) {
+            clear_connection_row(&s_connection_rows[i]);
             continue;
         }
         any = true;
@@ -868,7 +941,7 @@ static void push_event_line(const char *line) {
         memmove(s_event_lines[1], s_event_lines[0],
                 (MONITOR_EVENT_MAX_LINES - 1U) * MONITOR_EVENT_LINE_CHARS);
     }
-    (void)snprintf(s_event_lines[0], MONITOR_EVENT_LINE_CHARS, "%s", line);
+    (void) snprintf(s_event_lines[0], MONITOR_EVENT_LINE_CHARS, "%s", line);
     if (s_event_line_count < MONITOR_EVENT_MAX_LINES) {
         s_event_line_count++;
     }
@@ -877,35 +950,35 @@ static void push_event_line(const char *line) {
 
 static const char *event_name_from_code(uint8_t code) {
     switch (code) {
-    case SCP_EVENT_SWITCH_CHANGED:
-        return "switch_changed";
-    case SCP_EVENT_CONNECTION_DETECTED:
-        return "connection_detected";
-    case SCP_EVENT_CONNECTION_LOST:
-        return "connection_lost";
-    default:
-        return "event_unknown";
+        case SCP_EVENT_SWITCH_CHANGED:
+            return "switch_changed";
+        case SCP_EVENT_CONNECTION_DETECTED:
+            return "connection_detected";
+        case SCP_EVENT_CONNECTION_LOST:
+            return "connection_lost";
+        default:
+            return "event_unknown";
     }
 }
 
 static bool decode_module_id_from_msg_id(uint32_t msg_id, uint8_t *module_id_out) {
     if (msg_id >= SCP_MSG_HEARTBEAT_BASE && msg_id < (SCP_MSG_HEARTBEAT_BASE + MONITOR_HEARTBEAT_WINDOW)) {
         if (module_id_out != NULL) {
-            *module_id_out = (uint8_t)(msg_id - SCP_MSG_HEARTBEAT_BASE);
+            *module_id_out = (uint8_t) (msg_id - SCP_MSG_HEARTBEAT_BASE);
         }
         return true;
     }
 
     if (msg_id >= SCP_MSG_EVENT_BASE && msg_id < (SCP_MSG_EVENT_BASE + MONITOR_HEARTBEAT_WINDOW)) {
         if (module_id_out != NULL) {
-            *module_id_out = (uint8_t)(msg_id - SCP_MSG_EVENT_BASE);
+            *module_id_out = (uint8_t) (msg_id - SCP_MSG_EVENT_BASE);
         }
         return true;
     }
 
     if (msg_id >= SCP_MSG_FAULT_BASE && msg_id < SCP_MSG_HEARTBEAT_BASE) {
         if (module_id_out != NULL) {
-            *module_id_out = (uint8_t)(msg_id - SCP_MSG_FAULT_BASE);
+            *module_id_out = (uint8_t) (msg_id - SCP_MSG_FAULT_BASE);
         }
         return true;
     }
@@ -933,22 +1006,22 @@ static void format_can_event_line(const struct can2040_msg *msg, uint32_t uptime
 
     if (is_event_msg_id(msg->id) && msg->dlc >= 3U) {
         const char *event_name = event_name_from_code(msg->data[2]);
-        (void)snprintf(out,
-                       out_len,
-                       "[%8lu ms] M%u %s",
-                       (unsigned long)uptime_ms,
-                       (unsigned int)module_id,
-                       event_name);
+        (void) snprintf(out,
+                        out_len,
+                        "[%8lu ms] M%u %s",
+                        (unsigned long) uptime_ms,
+                        (unsigned int) module_id,
+                        event_name);
         return;
     }
 
-    (void)snprintf(out,
-                   out_len,
-                   "[%8lu ms] %sID 0x%03lx DLC%u",
-                   (unsigned long)uptime_ms,
-                   has_module_id ? "M" : "",
-                   (unsigned long)msg->id,
-                   (unsigned int)msg->dlc);
+    (void) snprintf(out,
+                    out_len,
+                    "[%8lu ms] %sID 0x%03lx DLC%u",
+                    (unsigned long) uptime_ms,
+                    has_module_id ? "M" : "",
+                    (unsigned long) msg->id,
+                    (unsigned int) msg->dlc);
 }
 
 static void move_marker_to_point(uint8_t point_index) {
@@ -968,11 +1041,11 @@ static void show_calibration_prompt(void) {
     }
 
     char instruction[96];
-    (void)snprintf(instruction,
-                   sizeof(instruction),
-                   "Tap marker %u/%u, hold briefly, then release.",
-                   (unsigned int)(s_current_point + 1U),
-                   (unsigned int)TOUCH_CALIBRATION_POINT_COUNT);
+    (void) snprintf(instruction,
+                    sizeof(instruction),
+                    "Tap marker %u/%u, hold briefly, then release.",
+                    (unsigned int) (s_current_point + 1U),
+                    (unsigned int) TOUCH_CALIBRATION_POINT_COUNT);
     lv_label_set_text(s_instruction_label, instruction);
 }
 
@@ -1000,13 +1073,13 @@ static void finish_calibration(void) {
     if (compute_transform()) {
         printf("touch calibration complete\n");
         printf("x = %.6f * raw_x + %.6f * raw_y + %.2f\n",
-               (double)s_transform.ax,
-               (double)s_transform.bx,
-               (double)s_transform.cx);
+               (double) s_transform.ax,
+               (double) s_transform.bx,
+               (double) s_transform.cx);
         printf("y = %.6f * raw_x + %.6f * raw_y + %.2f\n",
-               (double)s_transform.ay,
-               (double)s_transform.by,
-               (double)s_transform.cy);
+               (double) s_transform.ay,
+               (double) s_transform.by,
+               (double) s_transform.cy);
         if (save_calibration_to_flash()) {
             end_calibration_session("Touch calibration: saved to flash");
         } else {
@@ -1037,12 +1110,12 @@ static void update_calibration(void) {
         s_capture_samples++;
 
         char status[64];
-        (void)snprintf(status,
-                       sizeof(status),
-                       "capturing raw=(%u,%u), samples=%u",
-                       (unsigned int)raw_x,
-                       (unsigned int)raw_y,
-                       (unsigned int)s_capture_samples);
+        (void) snprintf(status,
+                        sizeof(status),
+                        "capturing raw=(%u,%u), samples=%u",
+                        (unsigned int) raw_x,
+                        (unsigned int) raw_y,
+                        (unsigned int) s_capture_samples);
         lv_label_set_text(s_status_label, status);
         return;
     }
@@ -1057,16 +1130,16 @@ static void update_calibration(void) {
         return;
     }
 
-    s_points[s_current_point].raw_x = (uint16_t)(s_capture_sum_x / s_capture_samples);
-    s_points[s_current_point].raw_y = (uint16_t)(s_capture_sum_y / s_capture_samples);
+    s_points[s_current_point].raw_x = (uint16_t) (s_capture_sum_x / s_capture_samples);
+    s_points[s_current_point].raw_y = (uint16_t) (s_capture_sum_y / s_capture_samples);
 
     char status[64];
-    (void)snprintf(status,
-                   sizeof(status),
-                   "P%u raw=(%u,%u) saved",
-                   (unsigned int)(s_current_point + 1U),
-                   (unsigned int)s_points[s_current_point].raw_x,
-                   (unsigned int)s_points[s_current_point].raw_y);
+    (void) snprintf(status,
+                    sizeof(status),
+                    "P%u raw=(%u,%u) saved",
+                    (unsigned int) (s_current_point + 1U),
+                    (unsigned int) s_points[s_current_point].raw_x,
+                    (unsigned int) s_points[s_current_point].raw_y);
     lv_label_set_text(s_status_label, status);
 
     s_current_point++;
@@ -1101,7 +1174,7 @@ static void start_calibration_session(void) {
 }
 
 static void on_start_calibration_clicked(lv_event_t *event) {
-    (void)event;
+    (void) event;
     start_calibration_session();
 }
 
@@ -1111,7 +1184,7 @@ static void set_brightness_value_label(uint8_t brightness_percent) {
     }
 
     char brightness_text[12];
-    (void)snprintf(brightness_text, sizeof(brightness_text), "%u%%", (unsigned int)brightness_percent);
+    (void) snprintf(brightness_text, sizeof(brightness_text), "%u%%", (unsigned int) brightness_percent);
     lv_label_set_text(s_brightness_value_label, brightness_text);
 }
 
@@ -1122,13 +1195,13 @@ static void on_brightness_slider_changed(lv_event_t *event) {
     }
 
     const int32_t value = lv_slider_get_value(slider);
-    const uint8_t brightness_percent = value < 0 ? 0U : (uint8_t)value;
+    const uint8_t brightness_percent = value < 0 ? 0U : (uint8_t) value;
     touch_calibrator_display_spi_set_backlight_percent(brightness_percent);
     set_brightness_value_label(brightness_percent);
 }
 
 static void monitor_touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
-    (void)indev_drv;
+    (void) indev_drv;
 
     if (s_mode == MONITOR_MODE_CALIBRATION) {
         data->state = LV_INDEV_STATE_REL;
@@ -1252,16 +1325,16 @@ static void build_ui(void) {
     lv_label_set_long_mode(flash_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(flash_label, lv_color_hex(0x9DB0C8), 0);
     const uint32_t flash_total_kib = PICO_FLASH_SIZE_BYTES / 1024U;
-    const uint32_t flash_used_bytes = (uint32_t)((uintptr_t)&__flash_binary_end - XIP_BASE);
+    const uint32_t flash_used_bytes = (uint32_t) ((uintptr_t) &__flash_binary_end - XIP_BASE);
     const uint32_t flash_free_kib = (PICO_FLASH_SIZE_BYTES > flash_used_bytes)
-                                    ? ((PICO_FLASH_SIZE_BYTES - flash_used_bytes) / 1024U)
-                                    : 0U;
+                                        ? ((PICO_FLASH_SIZE_BYTES - flash_used_bytes) / 1024U)
+                                        : 0U;
     char flash_text[96];
-    (void)snprintf(flash_text,
-                   sizeof(flash_text),
-                   "Flash: %lu KiB total, ~%lu KiB free",
-                   (unsigned long)flash_total_kib,
-                   (unsigned long)flash_free_kib);
+    (void) snprintf(flash_text,
+                    sizeof(flash_text),
+                    "Flash: %lu KiB total, ~%lu KiB free",
+                    (unsigned long) flash_total_kib,
+                    (unsigned long) flash_free_kib);
     lv_label_set_text(flash_label, flash_text);
 
     lv_obj_t *build_label = lv_label_create(tab_settings);
@@ -1271,7 +1344,7 @@ static void build_ui(void) {
     lv_obj_set_style_text_color(build_label, lv_color_hex(0x8493AA), 0);
 
     char build_text[96];
-    (void)snprintf(build_text, sizeof(build_text), "Firmware build: %s %s", __DATE__, __TIME__);
+    (void) snprintf(build_text, sizeof(build_text), "Firmware build: %s %s", __DATE__, __TIME__);
     lv_label_set_text(build_label, build_text);
 }
 
@@ -1362,13 +1435,13 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     disp_drv.ver_res = TOUCH_CALIBRATOR_DISP_VER_RES;
     disp_drv.flush_cb = ili9488_flush;
     disp_drv.draw_buf = &draw_buf;
-    (void)lv_disp_drv_register(&disp_drv);
+    (void) lv_disp_drv_register(&disp_drv);
 
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = monitor_touch_read_cb;
-    (void)lv_indev_drv_register(&indev_drv);
+    (void) lv_indev_drv_register(&indev_drv);
 
     build_ui();
     build_calibration_view();
@@ -1402,7 +1475,7 @@ void touch_calibrator_display_task_handler(void) {
         refresh_connection_rows(now_ms);
     }
 
-    (void)lv_timer_handler();
+    (void) lv_timer_handler();
 }
 
 void touch_calibrator_display_handle_can_message(const struct can2040_msg *msg, uint32_t uptime_ms) {
@@ -1410,18 +1483,15 @@ void touch_calibrator_display_handle_can_message(const struct can2040_msg *msg, 
         return;
     }
 
-    uint8_t module_id = 0U;
-    if (decode_module_id_from_msg_id(msg->id, &module_id)) {
-        const int idx = ensure_connection_row(module_id);
-        if (idx >= 0) {
-            if (is_heartbeat_msg_id(msg->id)) {
+    if (is_heartbeat_msg_id(msg->id)) {
+        uint8_t module_id = 0U;
+        if (decode_module_id_from_msg_id(msg->id, &module_id)) {
+            const int idx = ensure_connection_row(module_id);
+            if (idx >= 0) {
                 s_connection_rows[idx].heartbeat_seen = true;
                 s_connection_rows[idx].last_heartbeat_ms = uptime_ms;
             }
         }
-    }
-
-    if (is_heartbeat_msg_id(msg->id)) {
         return;
     }
 
