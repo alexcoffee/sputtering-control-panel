@@ -17,7 +17,7 @@ typedef struct {
 
 #define SWITCH_DEBOUNCE_US 20000
 #define SCP_LED_FLASH_PULSE_US 300
-#define SCP_HEARTBEAT_PERIOD 1500
+#define SCP_HEARTBEAT_PERIOD 500
 #define ONLINE_MESSAGE_DELAY_MS 5000
 
 int scp_module_run(const scp_module_config_t *cfg);

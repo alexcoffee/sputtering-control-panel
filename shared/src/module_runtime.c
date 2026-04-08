@@ -7,7 +7,6 @@
 #include "scp/can_bus.h"
 #include "scp/protocol.h"
 
-#define SCP_HEARTBEAT_PERIOD_MS 1000
 #define SCP_LED_FLASH_PERIOD_MS 1500
 
 static void scp_build_heartbeat(struct can2040_msg *msg,
@@ -90,7 +89,7 @@ int scp_module_run(const scp_module_config_t *cfg) {
     printf("%s online (module_id=%u)\n", cfg->module_name, cfg->module_id);
 
     heartbeat_counter = 0;
-    next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD_MS);
+    next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
     next_led_flash = make_timeout_time_ms(SCP_LED_FLASH_PERIOD_MS);
     while (true) {
         absolute_time_t now = get_absolute_time();
@@ -99,7 +98,7 @@ int scp_module_run(const scp_module_config_t *cfg) {
         if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
             scp_build_heartbeat(&tx_msg, cfg, SCP_STATE_RUN, heartbeat_counter++, uptime_ms);
             (void)scp_can_transmit(&can_bus, &tx_msg);
-            next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD_MS);
+            next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
         }
 
         if (absolute_time_diff_us(now, next_led_flash) <= 0) {
