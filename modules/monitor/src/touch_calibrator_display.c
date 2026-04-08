@@ -51,6 +51,11 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define MONITOR_EVENT_LINE_CHARS 96U
 #define MONITOR_EVENT_TEXT_CHARS ((MONITOR_EVENT_MAX_LINES * MONITOR_EVENT_LINE_CHARS) + MONITOR_EVENT_MAX_LINES + 1U)
 #define MONITOR_TAB_COUNT 3U
+#define MONITOR_TAB_CONNECTIONS_INDEX 0U
+#define MONITOR_TAB_SETTINGS_INDEX 2U
+#define MONITOR_SETTINGS_FOCUSABLE_COUNT 5U
+#define MONITOR_ENCODER_SLIDER_STEP 1
+#define MONITOR_ENCODER_BUTTON_FALLBACK_PIN 17U
 
 #define MONITOR_HEARTBEAT_WINDOW 0x80U
 #define MONITOR_HEARTBEAT_TIMEOUT_MS (SCP_HEARTBEAT_PERIOD * 3U)
@@ -143,6 +148,8 @@ static lv_obj_t *s_event_log_label;
 static lv_obj_t *s_settings_status_label;
 static lv_obj_t *s_brightness_value_label;
 static lv_obj_t *s_unit_status_label;
+static lv_obj_t *s_start_calibration_btn;
+static lv_obj_t *s_brightness_slider;
 static lv_obj_t *s_unit_torr_btn;
 static lv_obj_t *s_unit_bar_btn;
 static lv_obj_t *s_unit_voltage_btn;
@@ -171,6 +178,8 @@ static bool s_encoder_available;
 static uint8_t s_encoder_a_pin;
 static uint8_t s_encoder_b_pin;
 static uint8_t s_encoder_button_pin;
+static bool s_encoder_button_fallback_available;
+static uint8_t s_encoder_button_fallback_pin;
 static uint8_t s_encoder_prev_ab_state;
 static int8_t s_encoder_transition_accumulator;
 static int16_t s_encoder_step_delta;
@@ -178,6 +187,10 @@ static bool s_encoder_button_raw_pressed;
 static bool s_encoder_button_debounced_pressed;
 static uint32_t s_encoder_button_last_edge_ms;
 static bool s_encoder_button_click_pending;
+static bool s_encoder_button_active_low;
+static bool s_encoder_tab_entered;
+static bool s_encoder_slider_adjust_mode;
+static uint8_t s_settings_focus_index;
 static uint8_t s_selected_pressure_unit;
 static bool s_pressure_unit_command_pending;
 
@@ -213,6 +226,16 @@ static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins
 static void monitor_encoder_sample(uint32_t now_ms);
 
 static void monitor_encoder_apply_tab_navigation(void);
+static uint8_t monitor_encoder_get_active_tab_index(void);
+static bool monitor_encoder_settings_tab_active(void);
+static lv_obj_t *monitor_settings_get_focusable(uint8_t index);
+static void monitor_settings_set_focus_style(lv_obj_t *obj, bool focused);
+static void monitor_settings_clear_focus(void);
+static void monitor_settings_set_focus_index(uint8_t index);
+static void monitor_settings_step_focus(int8_t direction);
+static void monitor_settings_activate_focused(void);
+static void monitor_settings_adjust_brightness(int16_t steps);
+static void monitor_encoder_exit_tab_content_mode(void);
 
 static bool ili9488_draw_splash_from_flash(void);
 
@@ -702,6 +725,138 @@ static bool save_calibration_to_flash(void) {
            && stored->crc32 == stored_crc;
 }
 
+static uint8_t monitor_encoder_get_active_tab_index(void) {
+    if (s_root_tabs == NULL) {
+        return MONITOR_TAB_CONNECTIONS_INDEX;
+    }
+
+    const uint32_t active = lv_tabview_get_tab_act(s_root_tabs);
+    if (active >= MONITOR_TAB_COUNT) {
+        return MONITOR_TAB_CONNECTIONS_INDEX;
+    }
+    return (uint8_t) active;
+}
+
+static bool monitor_encoder_settings_tab_active(void) {
+    return monitor_encoder_get_active_tab_index() == MONITOR_TAB_SETTINGS_INDEX;
+}
+
+static lv_obj_t *monitor_settings_get_focusable(uint8_t index) {
+    switch (index) {
+    case 0U:
+        return s_start_calibration_btn;
+    case 1U:
+        return s_brightness_slider;
+    case 2U:
+        return s_unit_torr_btn;
+    case 3U:
+        return s_unit_bar_btn;
+    case 4U:
+        return s_unit_voltage_btn;
+    default:
+        return NULL;
+    }
+}
+
+static void monitor_settings_set_focus_style(lv_obj_t *obj, bool focused) {
+    if (obj == NULL) {
+        return;
+    }
+
+    if (focused) {
+        lv_obj_add_state(obj, LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_width(obj, 2, 0);
+        lv_obj_set_style_outline_color(obj, lv_color_hex(0x275DB3), 0);
+        lv_obj_set_style_outline_pad(obj, 2, 0);
+    } else {
+        lv_obj_clear_state(obj, LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_width(obj, 0, 0);
+    }
+}
+
+static void monitor_settings_clear_focus(void) {
+    for (uint8_t i = 0; i < MONITOR_SETTINGS_FOCUSABLE_COUNT; ++i) {
+        monitor_settings_set_focus_style(monitor_settings_get_focusable(i), false);
+    }
+}
+
+static void monitor_settings_set_focus_index(uint8_t index) {
+    monitor_settings_clear_focus();
+
+    for (uint8_t offset = 0; offset < MONITOR_SETTINGS_FOCUSABLE_COUNT; ++offset) {
+        const uint8_t candidate =
+                (uint8_t) ((index + offset) % MONITOR_SETTINGS_FOCUSABLE_COUNT);
+        lv_obj_t *focusable = monitor_settings_get_focusable(candidate);
+        if (focusable == NULL) {
+            continue;
+        }
+
+        s_settings_focus_index = candidate;
+        monitor_settings_set_focus_style(focusable, true);
+        return;
+    }
+}
+
+static void monitor_settings_step_focus(int8_t direction) {
+    if (direction == 0) {
+        return;
+    }
+
+    int16_t next = (int16_t) s_settings_focus_index + (direction > 0 ? 1 : -1);
+    if (next < 0) {
+        next = (int16_t) (MONITOR_SETTINGS_FOCUSABLE_COUNT - 1U);
+    } else if (next >= (int16_t) MONITOR_SETTINGS_FOCUSABLE_COUNT) {
+        next = 0;
+    }
+
+    monitor_settings_set_focus_index((uint8_t) next);
+}
+
+static void monitor_settings_adjust_brightness(int16_t steps) {
+    if (s_brightness_slider == NULL || steps == 0) {
+        return;
+    }
+
+    const int32_t min = lv_slider_get_min_value(s_brightness_slider);
+    const int32_t max = lv_slider_get_max_value(s_brightness_slider);
+    int32_t value = lv_slider_get_value(s_brightness_slider);
+    value += steps * MONITOR_ENCODER_SLIDER_STEP;
+    if (value < min) {
+        value = min;
+    } else if (value > max) {
+        value = max;
+    }
+
+    if (value != lv_slider_get_value(s_brightness_slider)) {
+        lv_slider_set_value(s_brightness_slider, value, LV_ANIM_OFF);
+        (void) lv_event_send(s_brightness_slider, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+}
+
+static void monitor_settings_activate_focused(void) {
+    lv_obj_t *focus_target = monitor_settings_get_focusable(s_settings_focus_index);
+    if (focus_target == NULL) {
+        monitor_settings_set_focus_index(0U);
+        focus_target = monitor_settings_get_focusable(s_settings_focus_index);
+    }
+    if (focus_target == NULL) {
+        return;
+    }
+
+    if (focus_target == s_brightness_slider) {
+        s_encoder_slider_adjust_mode = !s_encoder_slider_adjust_mode;
+        return;
+    }
+
+    (void) lv_event_send(focus_target, LV_EVENT_CLICKED, NULL);
+}
+
+static void monitor_encoder_exit_tab_content_mode(void) {
+    s_encoder_tab_entered = false;
+    s_encoder_slider_adjust_mode = false;
+    monitor_settings_clear_focus();
+}
+
 static void monitor_encoder_set_tab_relative(int8_t direction) {
     if (s_root_tabs == NULL || direction == 0) {
         return;
@@ -736,6 +891,8 @@ static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins
     s_encoder_a_pin = pins->encoder_a_pin;
     s_encoder_b_pin = pins->encoder_b_pin;
     s_encoder_button_pin = pins->encoder_button_pin;
+    s_encoder_button_fallback_available = false;
+    s_encoder_button_fallback_pin = MONITOR_ENCODER_BUTTON_FALLBACK_PIN;
 
     gpio_init(s_encoder_a_pin);
     gpio_set_dir(s_encoder_a_pin, GPIO_IN);
@@ -749,14 +906,30 @@ static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins
     gpio_set_dir(s_encoder_button_pin, GPIO_IN);
     gpio_pull_up(s_encoder_button_pin);
 
+    if (s_encoder_button_fallback_pin <= SCP_PICO_GPIO_MAX
+        && s_encoder_button_fallback_pin != s_encoder_a_pin
+        && s_encoder_button_fallback_pin != s_encoder_b_pin
+        && s_encoder_button_fallback_pin != s_encoder_button_pin) {
+        gpio_init(s_encoder_button_fallback_pin);
+        gpio_set_dir(s_encoder_button_fallback_pin, GPIO_IN);
+        gpio_pull_up(s_encoder_button_fallback_pin);
+        s_encoder_button_fallback_available = true;
+    }
+
     s_encoder_prev_ab_state = (uint8_t) (((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
                                          | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
     s_encoder_transition_accumulator = 0;
     s_encoder_step_delta = 0;
-    s_encoder_button_raw_pressed = gpio_get(s_encoder_button_pin) == 0U;
+    s_encoder_button_active_low = gpio_get(s_encoder_button_pin) != 0U;
+    s_encoder_button_raw_pressed = s_encoder_button_active_low
+                                           ? (gpio_get(s_encoder_button_pin) == 0U)
+                                           : (gpio_get(s_encoder_button_pin) != 0U);
     s_encoder_button_debounced_pressed = s_encoder_button_raw_pressed;
     s_encoder_button_last_edge_ms = now_ms;
     s_encoder_button_click_pending = false;
+    s_encoder_tab_entered = false;
+    s_encoder_slider_adjust_mode = false;
+    s_settings_focus_index = 0U;
     s_encoder_available = true;
 }
 
@@ -772,9 +945,29 @@ static void monitor_encoder_sample(uint32_t now_ms) {
         0, 1, -1, 0,
     };
 
+    bool button_raw_pressed = s_encoder_button_active_low
+                                      ? (gpio_get(s_encoder_button_pin) == 0U)
+                                      : (gpio_get(s_encoder_button_pin) != 0U);
+    if (s_encoder_button_fallback_available) {
+        const bool fallback_pressed = gpio_get(s_encoder_button_fallback_pin) == 0U;
+        button_raw_pressed = button_raw_pressed || fallback_pressed;
+    }
+    if (button_raw_pressed != s_encoder_button_raw_pressed) {
+        s_encoder_button_raw_pressed = button_raw_pressed;
+        s_encoder_button_last_edge_ms = now_ms;
+    }
+
+    const bool button_in_debounce_window =
+            ((uint32_t) (now_ms - s_encoder_button_last_edge_ms) < MONITOR_ENCODER_DEBOUNCE_MS);
+    const bool button_assumed_pressed = s_encoder_button_raw_pressed || s_encoder_button_debounced_pressed;
+
     const uint8_t curr_ab_state = (uint8_t) (((gpio_get(s_encoder_a_pin) ? 1U : 0U) << 1U)
                                              | (gpio_get(s_encoder_b_pin) ? 1U : 0U));
-    if (curr_ab_state != s_encoder_prev_ab_state) {
+    if (button_assumed_pressed || button_in_debounce_window) {
+        /* Ignore rotary jitter while pressing/releasing the encoder button. */
+        s_encoder_prev_ab_state = curr_ab_state;
+        s_encoder_transition_accumulator = 0;
+    } else if (curr_ab_state != s_encoder_prev_ab_state) {
         const int8_t transition = transition_lut[(s_encoder_prev_ab_state << 2U) | curr_ab_state];
         if (transition != 0) {
             s_encoder_transition_accumulator += transition;
@@ -789,13 +982,7 @@ static void monitor_encoder_sample(uint32_t now_ms) {
         s_encoder_prev_ab_state = curr_ab_state;
     }
 
-    const bool button_raw_pressed = gpio_get(s_encoder_button_pin) == 0U;
-    if (button_raw_pressed != s_encoder_button_raw_pressed) {
-        s_encoder_button_raw_pressed = button_raw_pressed;
-        s_encoder_button_last_edge_ms = now_ms;
-    }
-
-    if ((uint32_t) (now_ms - s_encoder_button_last_edge_ms) < MONITOR_ENCODER_DEBOUNCE_MS) {
+    if (button_in_debounce_window) {
         return;
     }
 
@@ -814,20 +1001,82 @@ static void monitor_encoder_apply_tab_navigation(void) {
     if (s_mode != MONITOR_MODE_UI || s_root_tabs == NULL) {
         s_encoder_step_delta = 0;
         s_encoder_button_click_pending = false;
+        monitor_encoder_exit_tab_content_mode();
+        return;
+    }
+
+    if (!s_encoder_tab_entered) {
+        while (s_encoder_step_delta > 0) {
+            monitor_encoder_set_tab_relative(1);
+            s_encoder_step_delta--;
+        }
+        while (s_encoder_step_delta < 0) {
+            monitor_encoder_set_tab_relative(-1);
+            s_encoder_step_delta++;
+        }
+
+        if (s_encoder_button_click_pending) {
+            s_encoder_tab_entered = true;
+            s_encoder_slider_adjust_mode = false;
+            if (monitor_encoder_settings_tab_active()) {
+                monitor_settings_set_focus_index(s_settings_focus_index);
+            }
+            s_encoder_button_click_pending = false;
+        }
+        return;
+    }
+
+    if (!monitor_encoder_settings_tab_active()) {
+        s_encoder_slider_adjust_mode = false;
+        monitor_settings_clear_focus();
+
+        if (s_encoder_step_delta != 0) {
+            s_encoder_tab_entered = false;
+            while (s_encoder_step_delta > 0) {
+                monitor_encoder_set_tab_relative(1);
+                s_encoder_step_delta--;
+            }
+            while (s_encoder_step_delta < 0) {
+                monitor_encoder_set_tab_relative(-1);
+                s_encoder_step_delta++;
+            }
+        }
+
+        if (s_encoder_button_click_pending) {
+            s_encoder_tab_entered = false;
+            s_encoder_button_click_pending = false;
+        }
+        return;
+    }
+
+    if (s_encoder_slider_adjust_mode) {
+        while (s_encoder_step_delta > 0) {
+            monitor_settings_adjust_brightness(1);
+            s_encoder_step_delta--;
+        }
+        while (s_encoder_step_delta < 0) {
+            monitor_settings_adjust_brightness(-1);
+            s_encoder_step_delta++;
+        }
+
+        if (s_encoder_button_click_pending) {
+            s_encoder_slider_adjust_mode = false;
+            s_encoder_button_click_pending = false;
+        }
         return;
     }
 
     while (s_encoder_step_delta > 0) {
-        monitor_encoder_set_tab_relative(1);
+        monitor_settings_step_focus(1);
         s_encoder_step_delta--;
     }
     while (s_encoder_step_delta < 0) {
-        monitor_encoder_set_tab_relative(-1);
+        monitor_settings_step_focus(-1);
         s_encoder_step_delta++;
     }
 
     if (s_encoder_button_click_pending) {
-        monitor_encoder_set_tab_relative(1);
+        monitor_settings_activate_focused();
         s_encoder_button_click_pending = false;
     }
 }
@@ -1419,14 +1668,14 @@ static void build_ui(void) {
     lv_obj_set_style_text_color(s_event_log_label, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
     refresh_event_log_label();
 
-    lv_obj_t *calibrate_btn = lv_btn_create(tab_settings);
-    lv_obj_set_size(calibrate_btn, 250, 46);
-    lv_obj_align(calibrate_btn, LV_ALIGN_TOP_LEFT, 8, 16);
-    lv_obj_set_style_bg_color(calibrate_btn, lv_color_hex(0x275DB3), 0);
-    lv_obj_set_style_bg_color(calibrate_btn, lv_color_hex(0x306FD1), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(calibrate_btn, on_start_calibration_clicked, LV_EVENT_CLICKED, NULL);
+    s_start_calibration_btn = lv_btn_create(tab_settings);
+    lv_obj_set_size(s_start_calibration_btn, 250, 46);
+    lv_obj_align(s_start_calibration_btn, LV_ALIGN_TOP_LEFT, 8, 16);
+    lv_obj_set_style_bg_color(s_start_calibration_btn, lv_color_hex(0x275DB3), 0);
+    lv_obj_set_style_bg_color(s_start_calibration_btn, lv_color_hex(0x306FD1), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(s_start_calibration_btn, on_start_calibration_clicked, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *cal_btn_label = lv_label_create(calibrate_btn);
+    lv_obj_t *cal_btn_label = lv_label_create(s_start_calibration_btn);
     lv_label_set_text(cal_btn_label, "Start Touch Calibration");
     lv_obj_center(cal_btn_label);
 
@@ -1442,17 +1691,17 @@ static void build_ui(void) {
     lv_obj_align(brightness_title_label, LV_ALIGN_TOP_LEFT, 8, 114);
     lv_obj_set_style_text_color(brightness_title_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
-    lv_obj_t *brightness_slider = lv_slider_create(tab_settings);
-    lv_obj_set_size(brightness_slider, TOUCH_CALIBRATOR_DISP_HOR_RES - 66, 18);
-    lv_obj_align(brightness_slider, LV_ALIGN_TOP_LEFT, 8, 134);
-    lv_slider_set_range(brightness_slider, 5, 100);
+    s_brightness_slider = lv_slider_create(tab_settings);
+    lv_obj_set_size(s_brightness_slider, TOUCH_CALIBRATOR_DISP_HOR_RES - 66, 18);
+    lv_obj_align(s_brightness_slider, LV_ALIGN_TOP_LEFT, 8, 134);
+    lv_slider_set_range(s_brightness_slider, 5, 100);
     uint8_t brightness_percent = touch_calibrator_display_spi_get_backlight_percent();
     if (brightness_percent < 5U) {
         brightness_percent = 5U;
         touch_calibrator_display_spi_set_backlight_percent(brightness_percent);
     }
-    lv_slider_set_value(brightness_slider, brightness_percent, LV_ANIM_OFF);
-    lv_obj_add_event_cb(brightness_slider, on_brightness_slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_slider_set_value(s_brightness_slider, brightness_percent, LV_ANIM_OFF);
+    lv_obj_add_event_cb(s_brightness_slider, on_brightness_slider_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     s_brightness_value_label = lv_label_create(tab_settings);
     lv_obj_align(s_brightness_value_label, LV_ALIGN_TOP_RIGHT, -8, 132);
@@ -1503,6 +1752,7 @@ static void build_ui(void) {
     lv_label_set_long_mode(s_unit_status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_unit_status_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     update_pressure_unit_controls();
+    monitor_settings_clear_focus();
 
     lv_obj_t *flash_label = lv_label_create(tab_settings);
     lv_obj_set_width(flash_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
@@ -1590,6 +1840,17 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     s_encoder_available = false;
     s_encoder_step_delta = 0;
     s_encoder_button_click_pending = false;
+    s_encoder_button_active_low = true;
+    s_encoder_button_fallback_available = false;
+    s_encoder_button_fallback_pin = MONITOR_ENCODER_BUTTON_FALLBACK_PIN;
+    s_encoder_tab_entered = false;
+    s_encoder_slider_adjust_mode = false;
+    s_settings_focus_index = 0U;
+    s_start_calibration_btn = NULL;
+    s_brightness_slider = NULL;
+    s_unit_torr_btn = NULL;
+    s_unit_bar_btn = NULL;
+    s_unit_voltage_btn = NULL;
     s_selected_pressure_unit = SCP_DISPLAY_UNIT_TORR;
     s_pressure_unit_command_pending = true;
 
