@@ -10,6 +10,7 @@
 #include "lvgl/lvgl.h"
 #include "pico/stdlib.h"
 #include "scp/can_bus.h"
+#include "scp/module_ids.h"
 #include "scp/module_runtime.h"
 #include "scp/protocol.h"
 
@@ -28,6 +29,8 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 
 #define ILI9488_SWRESET 0x01
 #define ILI9488_SLPOUT 0x11
+#define ILI9488_INVOFF 0x20
+#define ILI9488_INVON 0x21
 #define ILI9488_DISPON 0x29
 #define ILI9488_CASET 0x2A
 #define ILI9488_PASET 0x2B
@@ -56,6 +59,24 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 
 #define TOUCH_DEFAULT_RAW_MIN 200U
 #define TOUCH_DEFAULT_RAW_MAX 3800U
+
+#define MONITOR_STARTUP_DIAG_PATTERN 0
+#define MONITOR_STARTUP_DIAG_STEP_MS 1500U
+#define MONITOR_LCD_USE_BGR_ORDER 0
+#define MONITOR_LCD_USE_CUSTOM_TUNING 0
+/*
+ * Some ILI9488-compatible panels appear to interpret inversion polarity opposite
+ * to datasheet naming. For this panel variant, INVON renders expected colors.
+ */
+#define MONITOR_LCD_NORMAL_INVERSION_CMD ILI9488_INVON
+
+#define MONITOR_UI_BG_COLOR 0xF4F7FC
+#define MONITOR_UI_SURFACE_COLOR 0xFFFFFF
+#define MONITOR_UI_SURFACE_ALT_COLOR 0xF7FAFE
+#define MONITOR_UI_BORDER_COLOR 0xCCD8E6
+#define MONITOR_UI_TITLE_COLOR 0x225EA8
+#define MONITOR_UI_TEXT_COLOR 0x1E2A36
+#define MONITOR_UI_TEXT_MUTED_COLOR 0x5A6F86
 
 #define TOUCH_CAL_FLASH_MAGIC 0x434C4254u /* "TBLC" */
 #define TOUCH_CAL_FLASH_VERSION 4u
@@ -155,9 +176,10 @@ static uint32_t s_encoder_button_last_edge_ms;
 static bool s_encoder_button_click_pending;
 
 static const monitor_module_name_t s_module_names[] = {
-    {3U, "Pirani Gauge"},
-    {9U, "Roughing Pump"},
-    {11U, "Monitor"},
+    {SCP_MODULE_ID_ION_GAUGE, "Ion Gauge"},
+    {SCP_MODULE_ID_PIRANI, "Pirani Gauge"},
+    {SCP_MODULE_ID_ROUGHING_PUMP, "Roughing Pump"},
+    {SCP_MODULE_ID_MONITOR, "Monitor"},
 };
 
 static inline void ili9488_write(uint8_t mode, uint8_t value) {
@@ -222,6 +244,32 @@ static void ili9488_boot_test_pattern(void) {
     ili9488_fill_color565(0x001FU);
     sleep_ms(10);
 }
+
+#if MONITOR_STARTUP_DIAG_PATTERN
+static void ili9488_send_cmd(uint8_t cmd) {
+    touch_calibrator_display_spi_set_lcd_cs(0);
+    ili9488_write(ILI9488_CMD_MODE, cmd);
+    touch_calibrator_display_spi_set_lcd_cs(1);
+}
+
+static void ili9488_startup_diagnostic_pattern(void) {
+    static const uint16_t green_steps[] = {
+        0x01E0U, /* ~25% green */
+        0x03E0U, /* ~50% green */
+        0x05E0U, /* ~75% green */
+        0x07E0U, /* 100% green */
+    };
+
+    printf("monitor: startup green ramp diagnostic (%u ms/step)\n",
+           (unsigned int) MONITOR_STARTUP_DIAG_STEP_MS);
+
+    ili9488_send_cmd(MONITOR_LCD_NORMAL_INVERSION_CMD);
+    for (size_t i = 0; i < (sizeof(green_steps) / sizeof(green_steps[0])); ++i) {
+        ili9488_fill_color565(green_steps[i]);
+        sleep_ms(MONITOR_STARTUP_DIAG_STEP_MS);
+    }
+}
+#endif
 
 static bool ili9488_draw_splash_from_flash(void) {
     if (monitor_jar_splash_rgb565_width != TOUCH_CALIBRATOR_DISP_HOR_RES
@@ -288,12 +336,14 @@ static void ili9488_set_window(int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
 }
 
 static void ili9488_init_panel(void) {
+#if MONITOR_LCD_USE_CUSTOM_TUNING
     static const uint8_t gamma_pos[] = {0x00, 0x04, 0x0E, 0x08, 0x17, 0x0A, 0x40, 0x79, 0x4D, 0x07, 0x0E, 0x0A, 0x1A, 0x1D, 0x0F};
     static const uint8_t gamma_neg[] = {0x00, 0x1B, 0x1F, 0x02, 0x10, 0x05, 0x32, 0x34, 0x43, 0x02, 0x0A, 0x09, 0x32, 0x36, 0x0F};
     static const uint8_t power_c0[] = {0x17, 0x15};
     static const uint8_t power_c5[] = {0x00, 0x12, 0x80};
     static const uint8_t power_f7[] = {0xA9, 0x51, 0x2C, 0x82};
     static const uint8_t disp_fn[] = {0x02, 0x02};
+#endif
 
     touch_calibrator_display_spi_set_lcd_cs(1);
     touch_calibrator_display_spi_set_lcd_reset(0);
@@ -305,6 +355,7 @@ static void ili9488_init_panel(void) {
     ili9488_write(ILI9488_CMD_MODE, ILI9488_SWRESET);
     sleep_ms(120);
 
+#if MONITOR_LCD_USE_CUSTOM_TUNING
     ili9488_write(ILI9488_CMD_MODE, 0xE0);
     ili9488_write_array(ILI9488_DATA_MODE, gamma_pos, sizeof(gamma_pos));
     ili9488_write(ILI9488_CMD_MODE, 0xE1);
@@ -315,11 +366,17 @@ static void ili9488_init_panel(void) {
     ili9488_write(ILI9488_DATA_MODE, 0x41);
     ili9488_write(ILI9488_CMD_MODE, 0xC5);
     ili9488_write_array(ILI9488_DATA_MODE, power_c5, sizeof(power_c5));
+#endif
     /* Rotate panel output 180 degrees from the previous orientation (portrait, upside-down). */
     ili9488_write(ILI9488_CMD_MODE, ILI9488_MADCTL);
+#if MONITOR_LCD_USE_BGR_ORDER
     ili9488_write(ILI9488_DATA_MODE, ILI9488_MADCTL_MX | ILI9488_MADCTL_BGR);
+#else
+    ili9488_write(ILI9488_DATA_MODE, ILI9488_MADCTL_MX);
+#endif
     ili9488_write(ILI9488_CMD_MODE, ILI9488_PIXFMT);
     ili9488_write(ILI9488_DATA_MODE, 0x66);
+#if MONITOR_LCD_USE_CUSTOM_TUNING
     ili9488_write(ILI9488_CMD_MODE, 0xB0);
     ili9488_write(ILI9488_DATA_MODE, 0x00);
     ili9488_write(ILI9488_CMD_MODE, 0xB1);
@@ -330,8 +387,11 @@ static void ili9488_init_panel(void) {
     ili9488_write_array(ILI9488_DATA_MODE, disp_fn, sizeof(disp_fn));
     ili9488_write(ILI9488_CMD_MODE, 0xF7);
     ili9488_write_array(ILI9488_DATA_MODE, power_f7, sizeof(power_f7));
+#endif
     ili9488_write(ILI9488_CMD_MODE, ILI9488_SLPOUT);
     sleep_ms(120);
+    /* Apply panel-variant "normal color" inversion command. */
+    ili9488_write(ILI9488_CMD_MODE, MONITOR_LCD_NORMAL_INVERSION_CMD);
     ili9488_write(ILI9488_CMD_MODE, ILI9488_DISPON);
     sleep_ms(20);
 
@@ -851,8 +911,8 @@ static int ensure_connection_row(uint8_t module_id) {
         if (s_connections_list != NULL) {
             entry->row = lv_obj_create(s_connections_list);
             lv_obj_set_size(entry->row, lv_pct(100), LV_SIZE_CONTENT);
-            lv_obj_set_style_bg_color(entry->row, lv_color_hex(0x161D2B), 0);
-            lv_obj_set_style_border_color(entry->row, lv_color_hex(0x2A3347), 0);
+            lv_obj_set_style_bg_color(entry->row, lv_color_hex(MONITOR_UI_SURFACE_ALT_COLOR), 0);
+            lv_obj_set_style_border_color(entry->row, lv_color_hex(MONITOR_UI_BORDER_COLOR), 0);
             lv_obj_set_style_border_width(entry->row, 1, 0);
             lv_obj_set_style_radius(entry->row, 8, 0);
             lv_obj_set_style_pad_all(entry->row, 8, 0);
@@ -867,7 +927,7 @@ static int ensure_connection_row(uint8_t module_id) {
 
             entry->text = lv_label_create(entry->row);
             lv_obj_align(entry->text, LV_ALIGN_LEFT_MID, 26, 0);
-            lv_obj_set_style_text_color(entry->text, lv_color_hex(0xDFE7F5), 0);
+            lv_obj_set_style_text_color(entry->text, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
         }
 
         if (s_connections_empty_label != NULL) {
@@ -1226,18 +1286,20 @@ static void monitor_touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *da
 }
 
 static void build_ui(void) {
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x090C14), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(MONITOR_UI_BG_COLOR), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, LV_PART_MAIN);
 
     s_root_tabs = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 38);
     lv_obj_set_size(s_root_tabs, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(s_root_tabs, lv_color_hex(0x0D111B), 0);
+    lv_obj_set_style_bg_color(s_root_tabs, lv_color_hex(MONITOR_UI_SURFACE_COLOR), 0);
     lv_obj_set_style_bg_opa(s_root_tabs, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_root_tabs, 0, 0);
+    lv_obj_set_style_border_width(s_root_tabs, 1, 0);
+    lv_obj_set_style_border_color(s_root_tabs, lv_color_hex(MONITOR_UI_BORDER_COLOR), 0);
     lv_obj_t *tab_content = lv_tabview_get_content(s_root_tabs);
     lv_obj_clear_flag(tab_content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(tab_content, LV_DIR_NONE);
     lv_obj_set_style_anim_time(tab_content, 0, 0);
+    lv_obj_set_style_bg_color(tab_content, lv_color_hex(MONITOR_UI_SURFACE_COLOR), 0);
 
     lv_obj_t *tab_connections = lv_tabview_add_tab(s_root_tabs, "Connections");
     lv_obj_t *tab_events = lv_tabview_add_tab(s_root_tabs, "Event Log");
@@ -1255,13 +1317,13 @@ static void build_ui(void) {
     lv_obj_t *conn_title = lv_label_create(tab_connections);
     lv_label_set_text(conn_title, "CAN Modules");
     lv_obj_align(conn_title, LV_ALIGN_TOP_LEFT, 8, 8);
-    lv_obj_set_style_text_color(conn_title, lv_color_hex(0x9EC4FF), 0);
+    lv_obj_set_style_text_color(conn_title, lv_color_hex(MONITOR_UI_TITLE_COLOR), 0);
 
     s_connections_list = lv_obj_create(tab_connections);
     lv_obj_set_size(s_connections_list, lv_pct(100), lv_pct(100));
     lv_obj_align(s_connections_list, LV_ALIGN_TOP_LEFT, 0, 30);
-    lv_obj_set_style_bg_color(s_connections_list, lv_color_hex(0x101522), 0);
-    lv_obj_set_style_border_color(s_connections_list, lv_color_hex(0x263248), 0);
+    lv_obj_set_style_bg_color(s_connections_list, lv_color_hex(MONITOR_UI_SURFACE_COLOR), 0);
+    lv_obj_set_style_border_color(s_connections_list, lv_color_hex(MONITOR_UI_BORDER_COLOR), 0);
     lv_obj_set_style_border_width(s_connections_list, 1, 0);
     lv_obj_set_style_pad_all(s_connections_list, 8, 0);
     lv_obj_set_layout(s_connections_list, LV_LAYOUT_FLEX);
@@ -1270,13 +1332,13 @@ static void build_ui(void) {
 
     s_connections_empty_label = lv_label_create(s_connections_list);
     lv_label_set_text(s_connections_empty_label, "No modules discovered yet.");
-    lv_obj_set_style_text_color(s_connections_empty_label, lv_color_hex(0x96A3B8), 0);
+    lv_obj_set_style_text_color(s_connections_empty_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
     s_event_log_label = lv_label_create(tab_events);
     lv_obj_set_width(s_event_log_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 18);
     lv_obj_align(s_event_log_label, LV_ALIGN_TOP_LEFT, 8, 10);
     lv_label_set_long_mode(s_event_log_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(s_event_log_label, lv_color_hex(0xD8E2F0), 0);
+    lv_obj_set_style_text_color(s_event_log_label, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
     refresh_event_log_label();
 
     lv_obj_t *calibrate_btn = lv_btn_create(tab_settings);
@@ -1294,13 +1356,13 @@ static void build_ui(void) {
     lv_obj_set_width(s_settings_status_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
     lv_obj_align(s_settings_status_label, LV_ALIGN_TOP_LEFT, 8, 76);
     lv_label_set_long_mode(s_settings_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(s_settings_status_label, lv_color_hex(0xB9C8DD), 0);
+    lv_obj_set_style_text_color(s_settings_status_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     lv_label_set_text(s_settings_status_label, "Touch calibration: default mapping");
 
     lv_obj_t *brightness_title_label = lv_label_create(tab_settings);
     lv_label_set_text(brightness_title_label, "Brightness");
     lv_obj_align(brightness_title_label, LV_ALIGN_TOP_LEFT, 8, 114);
-    lv_obj_set_style_text_color(brightness_title_label, lv_color_hex(0x9DB0C8), 0);
+    lv_obj_set_style_text_color(brightness_title_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
     lv_obj_t *brightness_slider = lv_slider_create(tab_settings);
     lv_obj_set_size(brightness_slider, TOUCH_CALIBRATOR_DISP_HOR_RES - 66, 18);
@@ -1316,14 +1378,14 @@ static void build_ui(void) {
 
     s_brightness_value_label = lv_label_create(tab_settings);
     lv_obj_align(s_brightness_value_label, LV_ALIGN_TOP_RIGHT, -8, 132);
-    lv_obj_set_style_text_color(s_brightness_value_label, lv_color_hex(0xB9C8DD), 0);
+    lv_obj_set_style_text_color(s_brightness_value_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     set_brightness_value_label(brightness_percent);
 
     lv_obj_t *flash_label = lv_label_create(tab_settings);
     lv_obj_set_width(flash_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
     lv_obj_align(flash_label, LV_ALIGN_TOP_LEFT, 8, 160);
     lv_label_set_long_mode(flash_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(flash_label, lv_color_hex(0x9DB0C8), 0);
+    lv_obj_set_style_text_color(flash_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     const uint32_t flash_total_kib = PICO_FLASH_SIZE_BYTES / 1024U;
     const uint32_t flash_used_bytes = (uint32_t) ((uintptr_t) &__flash_binary_end - XIP_BASE);
     const uint32_t flash_free_kib = (PICO_FLASH_SIZE_BYTES > flash_used_bytes)
@@ -1341,7 +1403,7 @@ static void build_ui(void) {
     lv_obj_set_width(build_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
     lv_obj_align(build_label, LV_ALIGN_BOTTOM_LEFT, 8, -12);
     lv_label_set_long_mode(build_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(build_label, lv_color_hex(0x8493AA), 0);
+    lv_obj_set_style_text_color(build_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
     char build_text[96];
     (void) snprintf(build_text, sizeof(build_text), "Firmware build: %s %s", __DATE__, __TIME__);
@@ -1351,7 +1413,7 @@ static void build_ui(void) {
 static void build_calibration_view(void) {
     s_calibration_root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_calibration_root, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(s_calibration_root, lv_color_hex(0x0A0E19), 0);
+    lv_obj_set_style_bg_color(s_calibration_root, lv_color_hex(MONITOR_UI_BG_COLOR), 0);
     lv_obj_set_style_bg_opa(s_calibration_root, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_calibration_root, 0, 0);
     lv_obj_add_flag(s_calibration_root, LV_OBJ_FLAG_HIDDEN);
@@ -1359,19 +1421,19 @@ static void build_calibration_view(void) {
     lv_obj_t *title_label = lv_label_create(s_calibration_root);
     lv_label_set_text(title_label, "Touch Calibration");
     lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, 10, 8);
-    lv_obj_set_style_text_color(title_label, lv_color_hex(0x6AE4FF), 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(MONITOR_UI_TITLE_COLOR), 0);
 
     s_instruction_label = lv_label_create(s_calibration_root);
     lv_obj_set_width(s_instruction_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
     lv_obj_align(s_instruction_label, LV_ALIGN_TOP_LEFT, 10, 40);
     lv_label_set_long_mode(s_instruction_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(s_instruction_label, lv_color_hex(0xE5EDF5), 0);
+    lv_obj_set_style_text_color(s_instruction_label, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
 
     s_status_label = lv_label_create(s_calibration_root);
     lv_obj_set_width(s_status_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
     lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_LEFT, 10, -8);
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xA6C2D9), 0);
+    lv_obj_set_style_text_color(s_status_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
     s_marker = lv_obj_create(s_calibration_root);
     lv_obj_remove_style_all(s_marker);
@@ -1416,11 +1478,15 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     monitor_encoder_init(pins, to_ms_since_boot(get_absolute_time()));
     lv_init();
     ili9488_init_panel();
+#if MONITOR_STARTUP_DIAG_PATTERN
+    ili9488_startup_diagnostic_pattern();
+#else
     if (ili9488_draw_splash_from_flash()) {
         wait_for_splash_dismiss(5000U);
     } else {
         ili9488_boot_test_pattern();
     }
+#endif
 
     static lv_disp_draw_buf_t draw_buf;
     static lv_color_t draw_buf_1[TOUCH_CALIBRATOR_DISP_HOR_RES * TOUCH_CALIBRATOR_DRAW_BUF_LINES];

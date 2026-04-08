@@ -6,6 +6,7 @@
 #include "module_config.h"
 #include "scp/can_bus.h"
 #include "scp/can_messages.h"
+#include "scp/module_ids.h"
 #include "touch_calibrator_display.h"
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
@@ -33,7 +34,7 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
 
 const scp_module_config_t g_module_config = {
     .module_name = "monitor",
-    .module_id = 11,
+    .module_id = SCP_MODULE_ID_MONITOR,
     .can_pio_num = 0,
     .can_bitrate = 500000,
     .gpio_assignments = g_gpio_assignments,

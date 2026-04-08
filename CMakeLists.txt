@@ -35,7 +35,7 @@ endif()
 add_custom_target(check_module_pins
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_module_pins.py --generate-html --docs-dir docs/pinout --root ${CMAKE_SOURCE_DIR} --quiet
     DEPENDS ${CMAKE_SOURCE_DIR}/tools/check_module_pins.py ${SCP_MODULE_MAIN_SOURCES}
-    COMMENT "Checking module GPIO assignments for collisions"
+    COMMENT "Checking module GPIO assignments and module_id collisions"
     VERBATIM
 )
 

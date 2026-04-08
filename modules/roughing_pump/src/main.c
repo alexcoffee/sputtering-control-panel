@@ -7,6 +7,7 @@
 #include "roughing_pump_can_messages.h"
 #include "scp/can_messages.h"
 #include "scp/can_bus.h"
+#include "scp/module_ids.h"
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SCP_GPIO_SIGNAL_HEARTBEAT_LED, 25},
@@ -24,7 +25,7 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
 
 const scp_module_config_t g_module_config = {
     .module_name = "roughing_pump",
-    .module_id = 9,
+    .module_id = SCP_MODULE_ID_ROUGHING_PUMP,
     .can_pio_num = 0,
     .can_bitrate = 500000,
     .gpio_assignments = g_gpio_assignments,

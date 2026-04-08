@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate module GPIO assignments, print inverse pin maps, and generate pinout HTML."""
+"""Validate module GPIO assignments/module IDs, print inverse pin maps, and generate pinout HTML."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ import sys
 
 ASSIGNMENT_RE = re.compile(r"\{\s*(SCP_GPIO_SIGNAL_[A-Z0-9_]+)\s*,\s*([0-9]+)\s*\}")
 ARRAY_START_RE = re.compile(r"\bg_gpio_assignments\b\s*\[\]\s*=\s*\{")
+MODULE_ID_ASSIGNMENT_RE = re.compile(r"\.module_id\s*=\s*([A-Za-z_][A-Za-z0-9_]*|[0-9]+[uU]?)\s*,?")
+MODULE_ID_DEFINE_RE = re.compile(r"^\s*#define\s+(SCP_MODULE_ID_[A-Z0-9_]+)\s+([0-9]+)\s*[uU]?\b")
+NUMERIC_TOKEN_RE = re.compile(r"^([0-9]+)[uU]?$")
+MODULE_IDS_REGISTRY_REL_PATH = pathlib.Path("shared/include/scp/module_ids.h")
 SIGNAL_PREFIX = "SCP_GPIO_SIGNAL_"
 
 PHYSICAL_TO_LABEL = {
@@ -98,7 +102,7 @@ NON_HEADER_GPIO_NOTES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check per-module GPIO collisions and print used/available GPIOs."
+        description="Check per-module GPIO/module_id collisions and print used/available GPIOs."
     )
     parser.add_argument("--root", default=".", help="Repository root.")
     parser.add_argument("--gpio-min", type=int, default=0, help="Lowest GPIO number.")
@@ -133,6 +137,35 @@ def parse_module_main(path: pathlib.Path) -> list[tuple[str, int]]:
         if match:
             assignments.append((match.group(1), int(match.group(2))))
     return assignments
+
+
+def parse_module_id_token(path: pathlib.Path) -> str | None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = MODULE_ID_ASSIGNMENT_RE.search(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def parse_module_id_registry(path: pathlib.Path) -> dict[str, int]:
+    registry: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = MODULE_ID_DEFINE_RE.match(line)
+        if not match:
+            continue
+        registry[match.group(1)] = int(match.group(2))
+    return registry
+
+
+def resolve_module_id_token(module_id_token: str, registry: dict[str, int]) -> tuple[int | None, str | None]:
+    if module_id_token in registry:
+        return registry[module_id_token], None
+
+    numeric_match = NUMERIC_TOKEN_RE.fullmatch(module_id_token)
+    if numeric_match:
+        return None, "module_id must use shared registry constants (SCP_MODULE_ID_*) instead of numeric literals"
+
+    return None, f"module_id token '{module_id_token}' not found in shared registry"
 
 
 def normalize_signal_name(signal_macro: str) -> str:
@@ -480,9 +513,47 @@ def main() -> int:
         return 1
 
     has_error = False
+    module_ids_registry_path = root / MODULE_IDS_REGISTRY_REL_PATH
+    if not module_ids_registry_path.exists():
+        print(f"[ERROR] Missing module ID registry: {module_ids_registry_path}")
+        return 1
+
+    module_id_registry = parse_module_id_registry(module_ids_registry_path)
+    if not module_id_registry:
+        print(f"[ERROR] No SCP_MODULE_ID_* entries parsed from {module_ids_registry_path}")
+        return 1
+
+    registry_value_to_names: dict[int, list[str]] = {}
+    for symbol, module_id in module_id_registry.items():
+        registry_value_to_names.setdefault(module_id, []).append(symbol)
+    for module_id, symbol_names in sorted(registry_value_to_names.items()):
+        if len(symbol_names) <= 1:
+            continue
+        has_error = True
+        print(
+            f"[ERROR] module_id registry collision: {module_id} is assigned to symbols: "
+            f"{', '.join(sorted(symbol_names))}"
+        )
+
+    module_id_to_modules: dict[int, list[str]] = {}
     for main_path in mains:
         module_name = main_path.parts[-3]
         assignments = parse_module_main(main_path)
+        module_id_token = parse_module_id_token(main_path)
+        module_id: int | None = None
+        if module_id_token is None:
+            has_error = True
+            print(f"[ERROR] {module_name}: could not parse g_module_config.module_id from {main_path}")
+        else:
+            module_id, resolve_error = resolve_module_id_token(module_id_token, module_id_registry)
+            if resolve_error is not None:
+                has_error = True
+                print(
+                    f"[ERROR] {module_name}: {resolve_error} "
+                    f"(found '{module_id_token}' in {main_path})"
+                )
+            else:
+                module_id_to_modules.setdefault(module_id, []).append(module_name)
 
         pins_to_signals: dict[int, list[str]] = {}
         for signal, pin in assignments:
@@ -508,6 +579,8 @@ def main() -> int:
             ]
 
             print(f"[INFO] {module_name}")
+            if module_id is not None:
+                print(f"  module_id: {module_id} ({module_id_token})")
             if used:
                 for pin in used:
                     print(f"  GPIO {pin}: {', '.join(pins_to_signals[pin])}")
@@ -525,6 +598,15 @@ def main() -> int:
                 except ValueError:
                     shown = out_path
                 print(f"  Generated HTML: {shown}")
+
+    for module_id, module_names in sorted(module_id_to_modules.items()):
+        if len(module_names) <= 1:
+            continue
+        has_error = True
+        print(
+            f"[ERROR] module_id collision: {module_id} is used by modules: "
+            f"{', '.join(sorted(module_names))}"
+        )
 
     return 1 if has_error else 0
 
