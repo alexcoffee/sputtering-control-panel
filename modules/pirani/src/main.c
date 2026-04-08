@@ -9,21 +9,32 @@
 #include "scp/can_bus.h"
 #include "scp/can_messages.h"
 #include "scp/module_ids.h"
+#include "scp/protocol.h"
 
 #define SENSOR_SAMPLE_PERIOD_MS 100
+#define PRESSURE_TRANSMIT_PERIOD_MS 1000
 #define PRESSURE_DISCONNECTED_TORR 1000.0f
 #define PRESSURE_CONNECTED_MIN_VOLTAGE 2.0f
 #define PRESSURE_CONNECTED_MAX_VOLTAGE 10.0f
 
-static pressure_display_unit_t pressure_unit_from_switch_state(bool switch_a_active, bool switch_b_active) {
-    if (switch_a_active && !switch_b_active) {
-        return PRESSURE_DISPLAY_UNIT_BAR;
-    }
-    if (!switch_a_active && switch_b_active) {
-        return PRESSURE_DISPLAY_UNIT_VOLTAGE;
+static bool pressure_unit_from_protocol_value(uint8_t protocol_value, pressure_display_unit_t *unit_out) {
+    if (unit_out == NULL) {
+        return false;
     }
 
-    return PRESSURE_DISPLAY_UNIT_TORR;
+    switch (protocol_value) {
+        case SCP_DISPLAY_UNIT_TORR:
+            *unit_out = PRESSURE_DISPLAY_UNIT_TORR;
+            return true;
+        case SCP_DISPLAY_UNIT_BAR:
+            *unit_out = PRESSURE_DISPLAY_UNIT_BAR;
+            return true;
+        case SCP_DISPLAY_UNIT_VOLTAGE:
+            *unit_out = PRESSURE_DISPLAY_UNIT_VOLTAGE;
+            return true;
+        default:
+            return false;
+    }
 }
 
 static const char *pressure_unit_name(pressure_display_unit_t unit) {
@@ -36,6 +47,20 @@ static const char *pressure_unit_name(pressure_display_unit_t unit) {
         default:
             return "torr";
     }
+}
+
+static bool try_parse_set_display_unit_command(const struct can2040_msg *msg, pressure_display_unit_t *unit_out) {
+    if (msg == NULL || unit_out == NULL) {
+        return false;
+    }
+    if (msg->id != scp_protocol_command_msg_id(SCP_MODULE_ID_PIRANI)) {
+        return false;
+    }
+    if (msg->dlc < 4U || msg->data[0] != SCP_PROTOCOL_VERSION || msg->data[2] != SCP_COMMAND_SET_DISPLAY_UNIT) {
+        return false;
+    }
+
+    return pressure_unit_from_protocol_value(msg->data[3], unit_out);
 }
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
@@ -54,8 +79,6 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SCP_GPIO_SIGNAL_LCD_RESET, 6},
     {SCP_GPIO_SIGNAL_LCD_BACKLIGHT, 8},
     {SCP_GPIO_SIGNAL_PRESSURE_SENSOR_ADC, 28},
-    {SCP_GPIO_SIGNAL_SWITCH_A, 13},
-    {SCP_GPIO_SIGNAL_SWITCH_B, 14},
 };
 const scp_module_config_t g_module_config = {
     .module_name = "pirani",
@@ -76,6 +99,7 @@ int main(void) {
 
     absolute_time_t next_heartbeat = nil_time;
     absolute_time_t next_sensor_sample = nil_time;
+    absolute_time_t next_pressure_transmit = nil_time;
     uint8_t heartbeat_counter = 0;
 
     // gpio
@@ -91,8 +115,6 @@ int main(void) {
     uint8_t lcd_reset_gpio;
     uint8_t lcd_backlight_gpio;
     uint8_t pressure_sensor_adc_gpio;
-    uint8_t switch_a_gpio;
-    uint8_t switch_b_gpio;
 
     if (!scp_module_build_gpio_map(&g_module_config, &gpio_map)) {
         return 1;
@@ -110,9 +132,7 @@ int main(void) {
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_COMMAND, &lcd_command_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_RESET, &lcd_reset_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_BACKLIGHT, &lcd_backlight_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_PRESSURE_SENSOR_ADC, &pressure_sensor_adc_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_A, &switch_a_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_B, &switch_b_gpio)) {
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_PRESSURE_SENSOR_ADC, &pressure_sensor_adc_gpio)) {
         printf("%s pin map error: missing required signal\n", g_module_config.module_name);
         return 1;
     }
@@ -128,14 +148,6 @@ int main(void) {
     gpio_init(connection_activity_gpio);
     gpio_set_dir(connection_activity_gpio, GPIO_OUT);
     gpio_put(connection_activity_gpio, 0);
-
-    gpio_init(switch_a_gpio);
-    gpio_set_dir(switch_a_gpio, GPIO_IN);
-    gpio_pull_up(switch_a_gpio);
-
-    gpio_init(switch_b_gpio);
-    gpio_set_dir(switch_b_gpio, GPIO_IN);
-    gpio_pull_up(switch_b_gpio);
 
     if (!scp_can_init(&can_bus,
                       g_module_config.can_pio_num,
@@ -168,9 +180,13 @@ int main(void) {
 
     next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
     next_sensor_sample = make_timeout_time_ms(SENSOR_SAMPLE_PERIOD_MS);
+    next_pressure_transmit = make_timeout_time_ms(PRESSURE_TRANSMIT_PERIOD_MS);
     uint32_t last_lvgl_tick_ms = to_ms_since_boot(get_absolute_time());
     bool last_connection_ok = false;
-    pressure_display_unit_t last_display_unit = PRESSURE_DISPLAY_UNIT_TORR;
+    bool has_pressure_sample = false;
+    bool last_pressure_connection_ok = false;
+    float last_pressure_torr = PRESSURE_DISCONNECTED_TORR;
+    pressure_display_unit_t display_unit = PRESSURE_DISPLAY_UNIT_TORR;
 
     while (true) {
         const absolute_time_t now = get_absolute_time();
@@ -186,10 +202,7 @@ int main(void) {
         if (absolute_time_diff_us(now, next_sensor_sample) <= 0) {
             const pressure_sensor_reading_t pressure_reading = pressure_sensor_read_torr();
             const bool connection_ok = pressure_reading.voltage >= PRESSURE_CONNECTED_MIN_VOLTAGE
-                                       && pressure_reading.voltage <= 10.3;
-            const bool switch_a_active = !gpio_get(switch_a_gpio);
-            const bool switch_b_active = !gpio_get(switch_b_gpio);
-            const pressure_display_unit_t display_unit = pressure_unit_from_switch_state(switch_a_active, switch_b_active);
+                                       && pressure_reading.voltage <= PRESSURE_CONNECTED_MAX_VOLTAGE;
             const float display_torr = connection_ok ? pressure_reading.pressure_torr : PRESSURE_DISCONNECTED_TORR;
             gpio_put(connection_ok_gpio, connection_ok);
 
@@ -197,12 +210,6 @@ int main(void) {
                 pressure_display_render(display_torr, pressure_reading.voltage, display_unit);
             } else {
                 pressure_display_render_unplugged();
-            }
-
-            if (display_unit != last_display_unit) {
-                printf("\nunit changed: %s\n", pressure_unit_name(display_unit));
-                fflush(stdout);
-                last_display_unit = display_unit;
             }
 
             if (connection_ok && !last_connection_ok) {
@@ -217,8 +224,17 @@ int main(void) {
                 fflush(stdout);
             }
 
+            last_pressure_torr = display_torr;
+            last_pressure_connection_ok = connection_ok;
+            has_pressure_sample = true;
             last_connection_ok = connection_ok;
             next_sensor_sample = make_timeout_time_ms(SENSOR_SAMPLE_PERIOD_MS);
+        }
+
+        if (has_pressure_sample && absolute_time_diff_us(now, next_pressure_transmit) <= 0) {
+            build_pressure_reading_event(&tx_msg, g_module_config.module_id, last_pressure_torr, last_pressure_connection_ok);
+            (void) scp_can_transmit(&can_bus, &tx_msg);
+            next_pressure_transmit = make_timeout_time_ms(PRESSURE_TRANSMIT_PERIOD_MS);
         }
 
         // heartbeat
@@ -231,7 +247,12 @@ int main(void) {
         }
 
         if (scp_can_try_read(&can_bus, &rx_msg)) {
-            printf("RX id=0x%lx dlc=%u\n", (unsigned long) rx_msg.id, rx_msg.dlc);
+            pressure_display_unit_t requested_unit = display_unit;
+            if (try_parse_set_display_unit_command(&rx_msg, &requested_unit) && requested_unit != display_unit) {
+                display_unit = requested_unit;
+                printf("\nunit changed via CAN: %s\n", pressure_unit_name(display_unit));
+                fflush(stdout);
+            }
         }
 
         sleep_us(10);

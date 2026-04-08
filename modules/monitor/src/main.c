@@ -215,6 +215,21 @@ int main(void) {
             touch_calibrator_display_handle_can_message(&rx_msg, now_ms);
         }
 
+        uint8_t requested_display_unit = 0U;
+        if (touch_calibrator_display_take_pressure_unit_command(&requested_display_unit)) {
+            build_set_display_unit_command(&tx_msg,
+                                           g_module_config.module_id,
+                                           SCP_MODULE_ID_ION_GAUGE,
+                                           requested_display_unit);
+            (void) scp_can_transmit(&can_bus, &tx_msg);
+
+            build_set_display_unit_command(&tx_msg,
+                                           g_module_config.module_id,
+                                           SCP_MODULE_ID_PIRANI,
+                                           requested_display_unit);
+            (void) scp_can_transmit(&can_bus, &tx_msg);
+        }
+
         if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
             build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
             (void)scp_can_transmit(&can_bus, &tx_msg);

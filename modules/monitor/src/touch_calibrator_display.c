@@ -142,6 +142,10 @@ static lv_obj_t *s_connections_empty_label;
 static lv_obj_t *s_event_log_label;
 static lv_obj_t *s_settings_status_label;
 static lv_obj_t *s_brightness_value_label;
+static lv_obj_t *s_unit_status_label;
+static lv_obj_t *s_unit_torr_btn;
+static lv_obj_t *s_unit_bar_btn;
+static lv_obj_t *s_unit_voltage_btn;
 
 static lv_obj_t *s_calibration_root;
 static lv_obj_t *s_instruction_label;
@@ -174,6 +178,8 @@ static bool s_encoder_button_raw_pressed;
 static bool s_encoder_button_debounced_pressed;
 static uint32_t s_encoder_button_last_edge_ms;
 static bool s_encoder_button_click_pending;
+static uint8_t s_selected_pressure_unit;
+static bool s_pressure_unit_command_pending;
 
 static const monitor_module_name_t s_module_names[] = {
     {SCP_MODULE_ID_ION_GAUGE, "Ion Gauge"},
@@ -211,6 +217,9 @@ static void monitor_encoder_apply_tab_navigation(void);
 static bool ili9488_draw_splash_from_flash(void);
 
 static void wait_for_splash_dismiss(uint32_t max_wait_ms);
+static void update_pressure_unit_controls(void);
+static void request_pressure_unit_change(uint8_t unit);
+static void on_pressure_unit_button_clicked(lv_event_t *event);
 
 static const char *friendly_module_name(uint8_t module_id);
 static bool is_connection_row_online(const monitor_connection_row_t *entry, uint32_t now_ms);
@@ -1016,6 +1025,8 @@ static const char *event_name_from_code(uint8_t code) {
             return "connection_detected";
         case SCP_EVENT_CONNECTION_LOST:
             return "connection_lost";
+        case SCP_EVENT_PRESSURE_READING:
+            return "pressure_reading";
         default:
             return "event_unknown";
     }
@@ -1260,6 +1271,73 @@ static void on_brightness_slider_changed(lv_event_t *event) {
     set_brightness_value_label(brightness_percent);
 }
 
+static bool is_valid_pressure_unit(uint8_t unit) {
+    return unit == SCP_DISPLAY_UNIT_TORR
+           || unit == SCP_DISPLAY_UNIT_BAR
+           || unit == SCP_DISPLAY_UNIT_VOLTAGE;
+}
+
+static const char *pressure_unit_name(uint8_t unit) {
+    switch (unit) {
+        case SCP_DISPLAY_UNIT_BAR:
+            return "bar";
+        case SCP_DISPLAY_UNIT_VOLTAGE:
+            return "voltage";
+        case SCP_DISPLAY_UNIT_TORR:
+        default:
+            return "torr";
+    }
+}
+
+static void set_unit_button_selected_style(lv_obj_t *btn, bool selected) {
+    if (btn == NULL) {
+        return;
+    }
+
+    if (selected) {
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x275DB3), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x306FD1), LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(btn, lv_color_hex(0xFFFFFF), 0);
+    } else {
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0xE6EEF9), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0xD9E5F4), LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(btn, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
+    }
+}
+
+static void update_pressure_unit_controls(void) {
+    set_unit_button_selected_style(s_unit_torr_btn, s_selected_pressure_unit == SCP_DISPLAY_UNIT_TORR);
+    set_unit_button_selected_style(s_unit_bar_btn, s_selected_pressure_unit == SCP_DISPLAY_UNIT_BAR);
+    set_unit_button_selected_style(s_unit_voltage_btn, s_selected_pressure_unit == SCP_DISPLAY_UNIT_VOLTAGE);
+
+    if (s_unit_status_label != NULL) {
+        char unit_status[80];
+        (void) snprintf(unit_status,
+                        sizeof(unit_status),
+                        "Gauge units: %s%s",
+                        pressure_unit_name(s_selected_pressure_unit),
+                        s_pressure_unit_command_pending ? " (pending CAN send)" : "");
+        lv_label_set_text(s_unit_status_label, unit_status);
+    }
+}
+
+static void request_pressure_unit_change(uint8_t unit) {
+    if (!is_valid_pressure_unit(unit)) {
+        return;
+    }
+
+    if (unit != s_selected_pressure_unit) {
+        s_selected_pressure_unit = unit;
+    }
+    s_pressure_unit_command_pending = true;
+    update_pressure_unit_controls();
+}
+
+static void on_pressure_unit_button_clicked(lv_event_t *event) {
+    const uintptr_t user_data_value = (uintptr_t) lv_event_get_user_data(event);
+    request_pressure_unit_change((uint8_t) user_data_value);
+}
+
 static void monitor_touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
     (void) indev_drv;
 
@@ -1381,9 +1459,54 @@ static void build_ui(void) {
     lv_obj_set_style_text_color(s_brightness_value_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     set_brightness_value_label(brightness_percent);
 
+    lv_obj_t *unit_title_label = lv_label_create(tab_settings);
+    lv_label_set_text(unit_title_label, "Gauge Display Units");
+    lv_obj_align(unit_title_label, LV_ALIGN_TOP_LEFT, 8, 168);
+    lv_obj_set_style_text_color(unit_title_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
+
+    s_unit_torr_btn = lv_btn_create(tab_settings);
+    lv_obj_set_size(s_unit_torr_btn, 94, 36);
+    lv_obj_align(s_unit_torr_btn, LV_ALIGN_TOP_LEFT, 8, 190);
+    lv_obj_add_event_cb(s_unit_torr_btn,
+                        on_pressure_unit_button_clicked,
+                        LV_EVENT_CLICKED,
+                        (void *) (uintptr_t) SCP_DISPLAY_UNIT_TORR);
+    lv_obj_t *unit_torr_label = lv_label_create(s_unit_torr_btn);
+    lv_label_set_text(unit_torr_label, "Torr");
+    lv_obj_center(unit_torr_label);
+
+    s_unit_bar_btn = lv_btn_create(tab_settings);
+    lv_obj_set_size(s_unit_bar_btn, 94, 36);
+    lv_obj_align(s_unit_bar_btn, LV_ALIGN_TOP_LEFT, 109, 190);
+    lv_obj_add_event_cb(s_unit_bar_btn,
+                        on_pressure_unit_button_clicked,
+                        LV_EVENT_CLICKED,
+                        (void *) (uintptr_t) SCP_DISPLAY_UNIT_BAR);
+    lv_obj_t *unit_bar_label = lv_label_create(s_unit_bar_btn);
+    lv_label_set_text(unit_bar_label, "Bar");
+    lv_obj_center(unit_bar_label);
+
+    s_unit_voltage_btn = lv_btn_create(tab_settings);
+    lv_obj_set_size(s_unit_voltage_btn, 94, 36);
+    lv_obj_align(s_unit_voltage_btn, LV_ALIGN_TOP_LEFT, 210, 190);
+    lv_obj_add_event_cb(s_unit_voltage_btn,
+                        on_pressure_unit_button_clicked,
+                        LV_EVENT_CLICKED,
+                        (void *) (uintptr_t) SCP_DISPLAY_UNIT_VOLTAGE);
+    lv_obj_t *unit_voltage_label = lv_label_create(s_unit_voltage_btn);
+    lv_label_set_text(unit_voltage_label, "Voltage");
+    lv_obj_center(unit_voltage_label);
+
+    s_unit_status_label = lv_label_create(tab_settings);
+    lv_obj_set_width(s_unit_status_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
+    lv_obj_align(s_unit_status_label, LV_ALIGN_TOP_LEFT, 8, 232);
+    lv_label_set_long_mode(s_unit_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(s_unit_status_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
+    update_pressure_unit_controls();
+
     lv_obj_t *flash_label = lv_label_create(tab_settings);
     lv_obj_set_width(flash_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
-    lv_obj_align(flash_label, LV_ALIGN_TOP_LEFT, 8, 160);
+    lv_obj_align(flash_label, LV_ALIGN_TOP_LEFT, 8, 262);
     lv_label_set_long_mode(flash_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(flash_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     const uint32_t flash_total_kib = PICO_FLASH_SIZE_BYTES / 1024U;
@@ -1467,6 +1590,8 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     s_encoder_available = false;
     s_encoder_step_delta = 0;
     s_encoder_button_click_pending = false;
+    s_selected_pressure_unit = SCP_DISPLAY_UNIT_TORR;
+    s_pressure_unit_command_pending = true;
 
     s_points[0].screen = (lv_point_t){30, 30};
     s_points[1].screen = (lv_point_t){TOUCH_CALIBRATOR_DISP_HOR_RES - 31, 30};
@@ -1564,4 +1689,17 @@ void touch_calibrator_display_handle_can_message(const struct can2040_msg *msg, 
     char line[MONITOR_EVENT_LINE_CHARS];
     format_can_event_line(msg, uptime_ms, line, sizeof(line));
     push_event_line(line);
+}
+
+bool touch_calibrator_display_take_pressure_unit_command(uint8_t *unit_out) {
+    if (!s_pressure_unit_command_pending) {
+        return false;
+    }
+
+    s_pressure_unit_command_pending = false;
+    if (unit_out != NULL) {
+        *unit_out = s_selected_pressure_unit;
+    }
+    update_pressure_unit_controls();
+    return true;
 }

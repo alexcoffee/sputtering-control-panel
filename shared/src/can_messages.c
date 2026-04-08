@@ -1,5 +1,7 @@
 #include "scp/can_messages.h"
 
+#include <string.h>
+
 #include "scp/can_bus.h"
 #include "scp/protocol.h"
 
@@ -40,4 +42,36 @@ void build_connection_lost_event(struct can2040_msg *msg, uint8_t module_id, uin
     msg->data[5] = (uint8_t) ((uptime_ms >> 8) & 0xFFU);
     msg->data[6] = (uint8_t) ((uptime_ms >> 16) & 0xFFU);
     msg->data[7] = (uint8_t) ((uptime_ms >> 24) & 0xFFU);
+}
+
+void build_pressure_reading_event(struct can2040_msg *msg, uint8_t module_id, float pressure_torr, bool connection_ok) {
+    uint32_t pressure_bits = 0U;
+    memcpy(&pressure_bits, &pressure_torr, sizeof(pressure_bits));
+
+    msg->id = scp_protocol_event_msg_id(module_id);
+    msg->dlc = 8;
+    msg->data[0] = SCP_PROTOCOL_VERSION;
+    msg->data[1] = module_id;
+    msg->data[2] = SCP_EVENT_PRESSURE_READING;
+    msg->data[3] = connection_ok ? 1U : 0U;
+    msg->data[4] = (uint8_t) (pressure_bits & 0xFFU);
+    msg->data[5] = (uint8_t) ((pressure_bits >> 8) & 0xFFU);
+    msg->data[6] = (uint8_t) ((pressure_bits >> 16) & 0xFFU);
+    msg->data[7] = (uint8_t) ((pressure_bits >> 24) & 0xFFU);
+}
+
+void build_set_display_unit_command(struct can2040_msg *msg,
+                                    uint8_t source_module_id,
+                                    uint8_t target_module_id,
+                                    uint8_t display_unit) {
+    msg->id = scp_protocol_command_msg_id(target_module_id);
+    msg->dlc = 8;
+    msg->data[0] = SCP_PROTOCOL_VERSION;
+    msg->data[1] = source_module_id;
+    msg->data[2] = SCP_COMMAND_SET_DISPLAY_UNIT;
+    msg->data[3] = display_unit;
+    msg->data[4] = 0U;
+    msg->data[5] = 0U;
+    msg->data[6] = 0U;
+    msg->data[7] = 0U;
 }
