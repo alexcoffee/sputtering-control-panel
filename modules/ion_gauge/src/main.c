@@ -3,6 +3,7 @@
 
 #include "pico/stdlib.h"
 
+#include "ion_gauge_can_messages.h"
 #include "module_config.h"
 #include "pressure_display.h"
 #include "pressure_sensor.h"
@@ -71,6 +72,8 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
 
     {SCP_GPIO_SIGNAL_CONNECTION_OK, 17},
     {SCP_GPIO_SIGNAL_CONNECTION_ACTIVITY, 15},
+    {SCP_GPIO_SIGNAL_SWITCH_ENABLE, 16},
+    {SCP_GPIO_SIGNAL_SSR, 14},
 
     {SCP_GPIO_SIGNAL_LCD_SPI_SCK, 2},
     {SCP_GPIO_SIGNAL_LCD_SDI, 3},
@@ -108,6 +111,8 @@ int main(void) {
     uint8_t heartbeat_led_gpio;
     uint8_t connection_ok_gpio;
     uint8_t connection_activity_gpio;
+    uint8_t switch_enable_gpio;
+    uint8_t pirani_opto_gpio;
     uint8_t lcd_spi_sck_gpio;
     uint8_t lcd_spi_tx_gpio;
     uint8_t lcd_spi_csn_gpio;
@@ -126,6 +131,8 @@ int main(void) {
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_TX, &can_gpio_tx)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_OK, &connection_ok_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_ACTIVITY, &connection_activity_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_ENABLE, &switch_enable_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SSR, &pirani_opto_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_SCK, &lcd_spi_sck_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SDI, &lcd_spi_tx_gpio)
         || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_CSN, &lcd_spi_csn_gpio)
@@ -148,6 +155,19 @@ int main(void) {
     gpio_init(connection_activity_gpio);
     gpio_set_dir(connection_activity_gpio, GPIO_OUT);
     gpio_put(connection_activity_gpio, 0);
+
+    gpio_init(switch_enable_gpio);
+    gpio_set_dir(switch_enable_gpio, GPIO_IN);
+    gpio_pull_up(switch_enable_gpio);
+
+    gpio_init(pirani_opto_gpio);
+    gpio_set_dir(pirani_opto_gpio, GPIO_OUT);
+    gpio_put(pirani_opto_gpio, 0);
+
+    bool last_switch_state = !gpio_get(switch_enable_gpio);
+    bool switch_candidate_state = last_switch_state;
+    absolute_time_t switch_candidate_since = get_absolute_time();
+    gpio_put(pirani_opto_gpio, last_switch_state);
 
     if (!scp_can_init(&can_bus,
                       g_module_config.can_pio_num,
@@ -188,10 +208,14 @@ int main(void) {
     float last_pressure_torr = PRESSURE_DISCONNECTED_TORR;
     pressure_display_unit_t display_unit = PRESSURE_DISPLAY_UNIT_TORR;
 
+    ion_gauge_build_switch_event(&tx_msg, last_switch_state, to_ms_since_boot(get_absolute_time()));
+    (void) scp_can_transmit(&can_bus, &tx_msg);
+
     while (true) {
         const absolute_time_t now = get_absolute_time();
         const uint32_t now_ms = to_ms_since_boot(now);
         const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
+        const bool switch_state = !gpio_get(switch_enable_gpio);
 
         if (elapsed_lvgl_ms != 0U) {
             pressure_display_tick(elapsed_lvgl_ms);
@@ -253,6 +277,22 @@ int main(void) {
                 printf("\nunit changed via CAN: %s\n", pressure_unit_name(display_unit));
                 fflush(stdout);
             }
+        }
+
+        if (switch_state != switch_candidate_state) {
+            switch_candidate_state = switch_state;
+            switch_candidate_since = now;
+        } else if (switch_candidate_state != last_switch_state
+                   && absolute_time_diff_us(switch_candidate_since, now) >= SWITCH_DEBOUNCE_US) {
+            last_switch_state = switch_candidate_state;
+            gpio_put(pirani_opto_gpio, last_switch_state);
+            ion_gauge_build_switch_event(&tx_msg, last_switch_state, now_ms);
+            (void) scp_can_transmit(&can_bus, &tx_msg);
+
+            printf("\nenable switch=%u -> pirani opto=%u\n",
+                   last_switch_state ? 1U : 0U,
+                   last_switch_state ? 1U : 0U);
+            fflush(stdout);
         }
 
         sleep_us(10);

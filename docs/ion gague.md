@@ -1,9 +1,9 @@
 # AIGX-S-NW25
 ![img.png](assets/ion-gauge.png)
 
-The ION Gauge is used to measure the pressure of the chamber when it reaches low pressure.
+The ION gauge is used to measure extremely low pressures of the chamber, way more than the Pirani gauge can handle.
 
-The gauge should not be operated at pressures higher than 50 mTorr
+The gauge should not be operated at pressures higher than 50 mTorr.
 You must degas the AIGX regularly. Failure to do so will affect the performance and reduce the lifetime of the
 gauge.
 Degas the AIGX when the pressure is below 10 uTorr.
