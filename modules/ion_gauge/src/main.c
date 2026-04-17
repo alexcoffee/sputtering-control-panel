@@ -63,7 +63,7 @@ static bool try_parse_set_display_unit_command(const struct can2040_msg *msg, pr
 
     return pressure_unit_from_protocol_value(msg->data[3], unit_out);
 }
-
+#define SCP_GPIO_SIGNAL_CONNECTION_OK "CONNECTION_OK"
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SCP_GPIO_SIGNAL_HEARTBEAT_LED, 25},
 
@@ -83,6 +83,7 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SCP_GPIO_SIGNAL_LCD_BACKLIGHT, 8},
     {SCP_GPIO_SIGNAL_PRESSURE_SENSOR_ADC, 28},
 };
+
 const scp_module_config_t g_module_config = {
     .module_name = "ion_gauge",
     .module_id = SCP_MODULE_ID_ION_GAUGE,
