@@ -18,7 +18,7 @@ function(scp_add_module module_dir target_name)
         pico_stdlib
     )
 
-    if(target_name STREQUAL "scp_pirani" OR target_name STREQUAL "scp_ion_gauge")
+    if(target_name STREQUAL "scp_pirani" OR target_name STREQUAL "scp_ion_gauge" OR target_name STREQUAL "scp_turbo_pump")
         target_sources(${target_name} PRIVATE
             ${CMAKE_SOURCE_DIR}/lv_drivers/display/GC9A01.c
         )
@@ -26,6 +26,7 @@ function(scp_add_module module_dir target_name)
 
     if(target_name STREQUAL "scp_pirani"
         OR target_name STREQUAL "scp_ion_gauge"
+        OR target_name STREQUAL "scp_turbo_pump"
         OR target_name STREQUAL "scp_monitor")
         target_include_directories(${target_name} PRIVATE
             ${CMAKE_SOURCE_DIR}
@@ -69,6 +70,7 @@ function(scp_add_module_ide_target module_name)
 
     if(module_name STREQUAL "pirani"
         OR module_name STREQUAL "ion_gauge"
+        OR module_name STREQUAL "turbo_pump"
         OR module_name STREQUAL "monitor")
         target_include_directories(scp_${module_name}_ide PRIVATE
             ${CMAKE_SOURCE_DIR}
@@ -87,6 +89,7 @@ endfunction()
 set(SCP_ALL_MODULES
     pirani
     ion_gauge
+    turbo_pump
     roughing_pump
     monitor
 )

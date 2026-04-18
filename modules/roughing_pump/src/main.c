@@ -10,17 +10,17 @@
 #include "scp/module_ids.h"
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
-    {SCP_GPIO_SIGNAL_HEARTBEAT_LED, 25},
+    {SIGNAL_HEARTBEAT_LED, 25},
 
-    {SCP_GPIO_SIGNAL_CAN_RX, 1},
-    {SCP_GPIO_SIGNAL_CAN_TX, 0},
+    {SIGNAL_CAN_RX, 1},
+    {SIGNAL_CAN_TX, 0},
 
-    {SCP_GPIO_SIGNAL_CONNECTION_OK, 10},
-    {SCP_GPIO_SIGNAL_CONNECTION_ACTIVITY, 11},
-    {SCP_GPIO_SIGNAL_CONNECTION_DETECT, 12},
+    {SIGNAL_CONNECTION_OK, 10},
+    {SIGNAL_CONNECTION_ACTIVITY, 11},
+    {SIGNAL_CONNECTION_DETECT, 12},
 
-    {SCP_GPIO_SIGNAL_SSR, 15},
-    {SCP_GPIO_SIGNAL_SWITCH_A, 17},
+    {SIGNAL_SSR, 15},
+    {SIGNAL_SWITCH_A, 17},
 };
 
 const scp_module_config_t g_module_config = {
@@ -59,14 +59,14 @@ int main(void) {
 
 
     if (0
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_HEARTBEAT_LED, &heartbeat_led_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_RX, &can_gpio_rx)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_TX, &can_gpio_tx)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_OK, &connection_ok_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_ACTIVITY, &connection_activity_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CONNECTION_DETECT, &connection_detect_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_A, &switch_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SSR, &ssr_gpio)) {
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_HEARTBEAT_LED, &heartbeat_led_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CAN_RX, &can_gpio_rx)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CAN_TX, &can_gpio_tx)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CONNECTION_OK, &connection_ok_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CONNECTION_ACTIVITY, &connection_activity_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CONNECTION_DETECT, &connection_detect_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_SWITCH_A, &switch_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_SSR, &ssr_gpio)) {
         printf("%s pin map error: missing required signal\n", g_module_config.module_name);
         return 1;
     }

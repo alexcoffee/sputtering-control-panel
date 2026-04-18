@@ -71,9 +71,9 @@ int scp_module_run(const scp_module_config_t *cfg) {
         return 2;
     }
 
-    if (!scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_RX, &can_gpio_rx)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_TX, &can_gpio_tx)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_HEARTBEAT_LED, &led_gpio)) {
+    if (!scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CAN_RX, &can_gpio_rx)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CAN_TX, &can_gpio_tx)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_HEARTBEAT_LED, &led_gpio)) {
         printf("%s pin map error: missing required signal (CAN_RX/CAN_TX/LED)\n", cfg->module_name);
         return 2;
     }

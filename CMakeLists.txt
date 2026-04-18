@@ -25,6 +25,7 @@ add_subdirectory(shared)
 if(SCP_BUILD_ALL_MODULES
     OR SCP_MODULE_TARGET STREQUAL "pirani"
     OR SCP_MODULE_TARGET STREQUAL "ion_gauge"
+    OR SCP_MODULE_TARGET STREQUAL "turbo_pump"
     OR SCP_MODULE_TARGET STREQUAL "monitor")
     add_subdirectory(lvgl)
     target_include_directories(lvgl SYSTEM PUBLIC

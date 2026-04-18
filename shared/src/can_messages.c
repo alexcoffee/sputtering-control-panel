@@ -60,6 +60,22 @@ void build_pressure_reading_event(struct can2040_msg *msg, uint8_t module_id, fl
     msg->data[7] = (uint8_t) ((pressure_bits >> 24) & 0xFFU);
 }
 
+void build_current_reading_event(struct can2040_msg *msg, uint8_t module_id, float current_amps, bool connection_ok) {
+    uint32_t current_bits = 0U;
+    memcpy(&current_bits, &current_amps, sizeof(current_bits));
+
+    msg->id = scp_protocol_event_msg_id(module_id);
+    msg->dlc = 8;
+    msg->data[0] = SCP_PROTOCOL_VERSION;
+    msg->data[1] = module_id;
+    msg->data[2] = SCP_EVENT_CURRENT_READING;
+    msg->data[3] = connection_ok ? 1U : 0U;
+    msg->data[4] = (uint8_t) (current_bits & 0xFFU);
+    msg->data[5] = (uint8_t) ((current_bits >> 8) & 0xFFU);
+    msg->data[6] = (uint8_t) ((current_bits >> 16) & 0xFFU);
+    msg->data[7] = (uint8_t) ((current_bits >> 24) & 0xFFU);
+}
+
 void build_set_display_unit_command(struct can2040_msg *msg,
                                     uint8_t source_module_id,
                                     uint8_t target_module_id,

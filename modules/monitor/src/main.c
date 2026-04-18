@@ -10,26 +10,26 @@
 #include "touch_calibrator_display.h"
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
-    {SCP_GPIO_SIGNAL_HEARTBEAT_LED, 25},
+    {SIGNAL_HEARTBEAT_LED, 25},
 
-    {SCP_GPIO_SIGNAL_CAN_TX, 0},
-    {SCP_GPIO_SIGNAL_CAN_RX, 1},
+    {SIGNAL_CAN_TX, 0},
+    {SIGNAL_CAN_RX, 1},
 
-    {SCP_GPIO_SIGNAL_LCD_SPI_CSN, 2},
-    {SCP_GPIO_SIGNAL_LCD_RESET, 3},
-    {SCP_GPIO_SIGNAL_LCD_SDO, 4},
-    {SCP_GPIO_SIGNAL_LCD_COMMAND, 5},
-    {SCP_GPIO_SIGNAL_LCD_SPI_SCK, 6},
-    {SCP_GPIO_SIGNAL_LCD_SDI, 7},
-    {SCP_GPIO_SIGNAL_LCD_BACKLIGHT, 8},
-    {SCP_GPIO_SIGNAL_TOUCH_SPI_CSN, 9},
-    {SCP_GPIO_SIGNAL_TOUCH_SPI_SCK, 10},
-    {SCP_GPIO_SIGNAL_TOUCH_SDI, 11},
-    {SCP_GPIO_SIGNAL_TOUCH_SDO, 12},
-    {SCP_GPIO_SIGNAL_TOUCH_IRQ, 13},
-    {SCP_GPIO_SIGNAL_SWITCH_A, 14},
-    {SCP_GPIO_SIGNAL_SWITCH_B, 15},
-    {SCP_GPIO_SIGNAL_SWITCH_ENABLE, 16},
+    {SIGNAL_LCD_SPI_CSN, 2},
+    {SIGNAL_LCD_RESET, 3},
+    {SIGNAL_LCD_SDO, 4},
+    {SIGNAL_LCD_COMMAND, 5},
+    {SIGNAL_LCD_SPI_SCK, 6},
+    {SIGNAL_LCD_SDI, 7},
+    {SIGNAL_LCD_BACKLIGHT, 8},
+    {SIGNAL_TOUCH_SPI_CSN, 9},
+    {SIGNAL_TOUCH_SPI_SCK, 10},
+    {SIGNAL_TOUCH_SDI, 11},
+    {SIGNAL_TOUCH_SDO, 12},
+    {SIGNAL_TOUCH_IRQ, 13},
+    {SIGNAL_SWITCH_A, 14},
+    {SIGNAL_SWITCH_B, 15},
+    {SIGNAL_SWITCH_ENABLE, 16},
 };
 
 const scp_module_config_t g_module_config = {
@@ -114,24 +114,24 @@ int main(void) {
     }
 
     if (0
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_HEARTBEAT_LED, &heartbeat_led_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_RX, &can_gpio_rx)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_CAN_TX, &can_gpio_tx)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_SCK, &lcd_spi_sck_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SDI, &lcd_spi_tx_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SDO, &lcd_spi_rx_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_SPI_CSN, &lcd_spi_csn_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_COMMAND, &lcd_command_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_RESET, &lcd_reset_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_LCD_BACKLIGHT, &lcd_backlight_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SPI_SCK, &touch_spi_sck_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SDI, &touch_spi_tx_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SDO, &touch_spi_rx_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_SPI_CSN, &touch_spi_csn_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_TOUCH_IRQ, &touch_irq_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_A, &encoder_a_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_B, &encoder_b_gpio)
-        || !scp_pico_gpio_map_find_pin(&gpio_map, SCP_GPIO_SIGNAL_SWITCH_ENABLE, &encoder_button_gpio)) {
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_HEARTBEAT_LED, &heartbeat_led_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CAN_RX, &can_gpio_rx)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_CAN_TX, &can_gpio_tx)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_SPI_SCK, &lcd_spi_sck_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_SDI, &lcd_spi_tx_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_SDO, &lcd_spi_rx_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_SPI_CSN, &lcd_spi_csn_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_COMMAND, &lcd_command_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_RESET, &lcd_reset_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_LCD_BACKLIGHT, &lcd_backlight_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_TOUCH_SPI_SCK, &touch_spi_sck_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_TOUCH_SDI, &touch_spi_tx_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_TOUCH_SDO, &touch_spi_rx_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_TOUCH_SPI_CSN, &touch_spi_csn_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_TOUCH_IRQ, &touch_irq_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_SWITCH_A, &encoder_a_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_SWITCH_B, &encoder_b_gpio)
+        || !scp_pico_gpio_map_find_pin(&gpio_map, SIGNAL_SWITCH_ENABLE, &encoder_button_gpio)) {
         printf("%s pin map error: missing required signal\n", g_module_config.module_name);
         return 1;
     }

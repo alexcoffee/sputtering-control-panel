@@ -12,13 +12,13 @@ import re
 import sys
 
 
-ASSIGNMENT_RE = re.compile(r"\{\s*(SCP_GPIO_SIGNAL_[A-Z0-9_]+)\s*,\s*([0-9]+)\s*\}")
+ASSIGNMENT_RE = re.compile(r"\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([0-9]+)\s*\}")
 ARRAY_START_RE = re.compile(r"\bg_gpio_assignments\b\s*\[\]\s*=\s*\{")
 MODULE_ID_ASSIGNMENT_RE = re.compile(r"\.module_id\s*=\s*([A-Za-z_][A-Za-z0-9_]*|[0-9]+[uU]?)\s*,?")
 MODULE_ID_DEFINE_RE = re.compile(r"^\s*#define\s+(SCP_MODULE_ID_[A-Z0-9_]+)\s+([0-9]+)\s*[uU]?\b")
 NUMERIC_TOKEN_RE = re.compile(r"^([0-9]+)[uU]?$")
 MODULE_IDS_REGISTRY_REL_PATH = pathlib.Path("shared/include/scp/module_ids.h")
-SIGNAL_PREFIX = "SCP_GPIO_SIGNAL_"
+SIGNAL_PREFIX = "SIGNAL_"
 
 PHYSICAL_TO_LABEL = {
     1: "GP0",
