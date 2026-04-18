@@ -3,10 +3,15 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-MODULE="${1:-monitor}"
 BUILD_DIR="./cmake-build-debug-eabi/"
+TARGET="${1:-monitor}"
 
 export PICO_SDK_PATH="${PICO_SDK_PATH:-$(pwd)/pico-sdk}"
 
-cmake -S . -B "${BUILD_DIR}" -DSCP_MODULE_TARGET="${MODULE}"
+if [[ "${TARGET}" == "all" || "${TARGET}" == "--all" ]]; then
+    cmake -S . -B "${BUILD_DIR}" -DSCP_BUILD_ALL_MODULES=ON
+else
+    cmake -S . -B "${BUILD_DIR}" -DSCP_BUILD_ALL_MODULES=OFF -DSCP_MODULE_TARGET="${TARGET}"
+fi
+
 cmake --build "${BUILD_DIR}"
