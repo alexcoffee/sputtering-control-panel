@@ -15,6 +15,7 @@
 #include "scp/protocol.h"
 
 extern char __flash_binary_end;
+extern char __end__;
 extern const uint32_t monitor_jar_splash_rgb565_width;
 extern const uint32_t monitor_jar_splash_rgb565_height;
 extern const uint16_t monitor_jar_splash_rgb565[];
@@ -47,7 +48,7 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define TOUCH_MIN_CAPTURE_SAMPLES 3U
 
 #define MONITOR_MAX_CONNECTION_ROWS 16U
-#define MONITOR_EVENT_MAX_LINES 14U
+#define MONITOR_EVENT_MAX_LINES 42U
 #define MONITOR_EVENT_LINE_CHARS 96U
 #define MONITOR_EVENT_TEXT_CHARS ((MONITOR_EVENT_MAX_LINES * MONITOR_EVENT_LINE_CHARS) + MONITOR_EVENT_MAX_LINES + 1U)
 #define MONITOR_TAB_COUNT 3U
@@ -198,6 +199,7 @@ static const monitor_module_name_t s_module_names[] = {
     {SCP_MODULE_ID_ION_GAUGE, "Ion Gauge"},
     {SCP_MODULE_ID_PIRANI, "Pirani Gauge"},
     {SCP_MODULE_ID_ROUGHING_PUMP, "Roughing Pump"},
+    {SCP_MODULE_ID_TURBO_PUMP, "Turbo Pump"},
     {SCP_MODULE_ID_MONITOR, "Monitor"},
 };
 
@@ -1276,6 +1278,8 @@ static const char *event_name_from_code(uint8_t code) {
             return "connection_lost";
         case SCP_EVENT_PRESSURE_READING:
             return "pressure_reading";
+        case SCP_EVENT_CURRENT_READING:
+            return "current_reading";
         default:
             return "event_unknown";
     }
@@ -1316,32 +1320,104 @@ static bool is_event_msg_id(uint32_t msg_id) {
            && msg_id < (SCP_MSG_EVENT_BASE + MONITOR_HEARTBEAT_WINDOW);
 }
 
+static const char *module_abbreviation(uint8_t module_id) {
+    switch (module_id) {
+    case SCP_MODULE_ID_ION_GAUGE:
+        return "IG";
+    case SCP_MODULE_ID_PIRANI:
+        return "PG";
+    case SCP_MODULE_ID_ROUGHING_PUMP:
+        return "RP";
+    case SCP_MODULE_ID_TURBO_PUMP:
+        return "TP";
+    default:
+        return NULL;
+    }
+}
+
+static void format_uptime_hh_mm_ss(uint32_t uptime_ms, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0U) {
+        return;
+    }
+
+    const uint32_t total_seconds = uptime_ms / 1000U;
+    const uint32_t hours = total_seconds / 3600U;
+    const uint32_t minutes = (total_seconds / 60U) % 60U;
+    const uint32_t seconds = total_seconds % 60U;
+    char hour_field[16];
+    const char first_sep = (hours == 0U) ? ' ' : ':';
+
+    if (hours == 0U) {
+        (void) snprintf(hour_field, sizeof(hour_field), "  ");
+    } else {
+        (void) snprintf(hour_field, sizeof(hour_field), "%2lu", (unsigned long) hours);
+    }
+
+    (void) snprintf(out,
+                    out_len,
+                    "%s%c%2lu:%02lu",
+                    hour_field,
+                    first_sep,
+                    (unsigned long) minutes,
+                    (unsigned long) seconds);
+}
+
 static void format_can_event_line(const struct can2040_msg *msg, uint32_t uptime_ms, char *out, size_t out_len) {
     if (out == NULL || out_len == 0U || msg == NULL) {
         return;
     }
 
+    char timestamp[16];
+    format_uptime_hh_mm_ss(uptime_ms, timestamp, sizeof(timestamp));
+
     uint8_t module_id = 0U;
     const bool has_module_id = decode_module_id_from_msg_id(msg->id, &module_id);
+    const char *module_code = has_module_id ? module_abbreviation(module_id) : NULL;
 
     if (is_event_msg_id(msg->id) && msg->dlc >= 3U) {
         const char *event_name = event_name_from_code(msg->data[2]);
-        (void) snprintf(out,
-                        out_len,
-                        "[%8lu ms] M%u %s",
-                        (unsigned long) uptime_ms,
-                        (unsigned int) module_id,
-                        event_name);
+        if (module_code != NULL) {
+            (void) snprintf(out,
+                            out_len,
+                            "%s %s %s",
+                            timestamp,
+                            module_code,
+                            event_name);
+        } else {
+            (void) snprintf(out,
+                            out_len,
+                            "%s M%u %s",
+                            timestamp,
+                            (unsigned int) module_id,
+                            event_name);
+        }
         return;
     }
 
-    (void) snprintf(out,
-                    out_len,
-                    "[%8lu ms] %sID 0x%03lx DLC%u",
-                    (unsigned long) uptime_ms,
-                    has_module_id ? "M" : "",
-                    (unsigned long) msg->id,
-                    (unsigned int) msg->dlc);
+    if (module_code != NULL) {
+        (void) snprintf(out,
+                        out_len,
+                        "%s %s ID 0x%03lx DLC%u",
+                        timestamp,
+                        module_code,
+                        (unsigned long) msg->id,
+                        (unsigned int) msg->dlc);
+    } else if (has_module_id) {
+        (void) snprintf(out,
+                        out_len,
+                        "%s M%u ID 0x%03lx DLC%u",
+                        timestamp,
+                        (unsigned int) module_id,
+                        (unsigned long) msg->id,
+                        (unsigned int) msg->dlc);
+    } else {
+        (void) snprintf(out,
+                        out_len,
+                        "%s ID 0x%03lx DLC%u",
+                        timestamp,
+                        (unsigned long) msg->id,
+                        (unsigned int) msg->dlc);
+    }
 }
 
 static void move_marker_to_point(uint8_t point_index) {
@@ -1634,9 +1710,10 @@ static void build_ui(void) {
     lv_obj_clear_flag(tab_connections, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(tab_connections, LV_DIR_NONE);
     lv_obj_set_scrollbar_mode(tab_connections, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_clear_flag(tab_events, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(tab_events, LV_DIR_NONE);
-    lv_obj_set_scrollbar_mode(tab_events, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scroll_dir(tab_events, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(tab_events, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_left(tab_events, 0, 0);
+    lv_obj_set_style_pad_right(tab_events, 0, 0);
     lv_obj_clear_flag(tab_settings, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(tab_settings, LV_DIR_NONE);
     lv_obj_set_scrollbar_mode(tab_settings, LV_SCROLLBAR_MODE_OFF);
@@ -1662,10 +1739,11 @@ static void build_ui(void) {
     lv_obj_set_style_text_color(s_connections_empty_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
     s_event_log_label = lv_label_create(tab_events);
-    lv_obj_set_width(s_event_log_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 18);
-    lv_obj_align(s_event_log_label, LV_ALIGN_TOP_LEFT, 8, 10);
+    lv_obj_set_width(s_event_log_label, lv_pct(100));
+    lv_obj_align(s_event_log_label, LV_ALIGN_TOP_LEFT, 0, 10);
     lv_label_set_long_mode(s_event_log_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_event_log_label, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
+    lv_obj_set_style_text_font(s_event_log_label, &lv_font_unscii_8, 0);
     refresh_event_log_label();
 
     s_start_calibration_btn = lv_btn_create(tab_settings);
@@ -1756,21 +1834,45 @@ static void build_ui(void) {
 
     lv_obj_t *flash_label = lv_label_create(tab_settings);
     lv_obj_set_width(flash_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
-    lv_obj_align(flash_label, LV_ALIGN_TOP_LEFT, 8, 262);
+    lv_obj_align(flash_label, LV_ALIGN_BOTTOM_LEFT, 8, -56);
     lv_label_set_long_mode(flash_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(flash_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     const uint32_t flash_total_kib = PICO_FLASH_SIZE_BYTES / 1024U;
     const uint32_t flash_used_bytes = (uint32_t) ((uintptr_t) &__flash_binary_end - XIP_BASE);
-    const uint32_t flash_free_kib = (PICO_FLASH_SIZE_BYTES > flash_used_bytes)
-                                        ? ((PICO_FLASH_SIZE_BYTES - flash_used_bytes) / 1024U)
-                                        : 0U;
+    const uint32_t flash_used_kib = flash_used_bytes / 1024U;
+    const uint32_t flash_used_percent = (flash_total_kib > 0U)
+                                            ? (uint32_t) ((((uint64_t) flash_used_kib * 100U) + (flash_total_kib / 2U)) /
+                                                          flash_total_kib)
+                                            : 0U;
     char flash_text[96];
     (void) snprintf(flash_text,
                     sizeof(flash_text),
-                    "Flash: %lu KiB total, ~%lu KiB free",
+                    "Flash: %luKB/%luKB (%lu%% used)",
+                    (unsigned long) flash_used_kib,
                     (unsigned long) flash_total_kib,
-                    (unsigned long) flash_free_kib);
+                    (unsigned long) flash_used_percent);
     lv_label_set_text(flash_label, flash_text);
+
+    lv_obj_t *ram_label = lv_label_create(tab_settings);
+    lv_obj_set_width(ram_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
+    lv_obj_align(ram_label, LV_ALIGN_BOTTOM_LEFT, 8, -34);
+    lv_label_set_long_mode(ram_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(ram_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
+    const uint32_t ram_total_kib = (SRAM_END - SRAM_BASE) / 1024U;
+    const uintptr_t ram_static_bytes = (uintptr_t) &__end__ - SRAM_BASE;
+    const uint32_t ram_static_kib = (uint32_t) (ram_static_bytes / 1024U);
+    const uint32_t ram_used_percent = (ram_total_kib > 0U)
+                                          ? (uint32_t) ((((uint64_t) ram_static_kib * 100U) + (ram_total_kib / 2U)) /
+                                                        ram_total_kib)
+                                          : 0U;
+    char ram_text[128];
+    (void) snprintf(ram_text,
+                    sizeof(ram_text),
+                    "RAM: %luKB/%luKB (%lu%% used)",
+                    (unsigned long) ram_static_kib,
+                    (unsigned long) ram_total_kib,
+                    (unsigned long) ram_used_percent);
+    lv_label_set_text(ram_label, ram_text);
 
     lv_obj_t *build_label = lv_label_create(tab_settings);
     lv_obj_set_width(build_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
