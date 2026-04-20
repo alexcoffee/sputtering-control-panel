@@ -72,8 +72,8 @@ static const scp_gpio_assignment_t g_gpio_assignments[] = {
     { SIGNAL_TURBO_IN_LOW_SPEED,13},
     { SIGNAL_TURBO_IN_START,14},
     { SIGNAL_TURBO_IN_FAULT,15},
-    { SIGNAL_TURBO_OUT_ENABLE,18},
-    { SIGNAL_TURBO_OUT_LOW_SPEED,21},
+    { SIGNAL_TURBO_OUT_ENABLE,21},
+    { SIGNAL_TURBO_OUT_LOW_SPEED,18},
 
 
     {SIGNAL_LCD_SPI_SCK, 2},

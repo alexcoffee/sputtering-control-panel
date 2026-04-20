@@ -8,8 +8,9 @@
 
 typedef struct {
     struct can2040 can;
-    volatile bool rx_pending;
-    struct can2040_msg rx_msg;
+    volatile uint8_t rx_head;
+    volatile uint8_t rx_tail;
+    struct can2040_msg rx_queue[16];
     int pio_num;
 } scp_can_bus_t;
 

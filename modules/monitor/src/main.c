@@ -211,7 +211,7 @@ int main(void) {
         }
         touch_calibrator_display_task_handler();
 
-        if (scp_can_try_read(&can_bus, &rx_msg)) {
+        while (scp_can_try_read(&can_bus, &rx_msg)) {
             touch_calibrator_display_handle_can_message(&rx_msg, now_ms);
         }
 

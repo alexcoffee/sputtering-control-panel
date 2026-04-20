@@ -1122,9 +1122,9 @@ static void clear_connection_row(monitor_connection_row_t *entry) {
 
 static lv_color_t online_status_dot_color(uint8_t module_id) {
     switch (module_id) {
-    case 3U:  /* Pirani */
+    case SCP_MODULE_ID_PIRANI:
         return lv_color_hex(~0xBF745E); /* orange */
-    case 9U:  /* Roughing pump */
+    case SCP_MODULE_ID_ROUGHING_PUMP:
         return lv_color_hex(~0x22C55E); /* green */
     default:
         return lv_color_hex(~0x5BE37D); /* default online green */
