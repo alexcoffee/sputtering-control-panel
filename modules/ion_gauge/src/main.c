@@ -7,8 +7,10 @@
 #include "module_config.h"
 #include "pressure_display.h"
 #include "pressure_sensor.h"
+#include "scp/bootloader.h"
 #include "scp/can_bus.h"
 #include "scp/can_messages.h"
+#include "scp/flash_can.h"
 #include "scp/module_ids.h"
 #include "scp/protocol.h"
 
@@ -95,8 +97,10 @@ const scp_module_config_t g_module_config = {
 
 int main(void) {
     stdio_init_all();
+    (void)scp_bootloader_run_if_requested(&g_module_config, SCP_BOOTLOADER_DEFAULT_IDLE_TIMEOUT_MS);
 
     scp_can_bus_t can_bus;
+    scp_flash_can_target_t flash_target;
     scp_pico_gpio_map_t gpio_map;
     struct can2040_msg tx_msg;
     struct can2040_msg rx_msg;
@@ -177,6 +181,7 @@ int main(void) {
                       can_gpio_tx)) {
         return 2;
     }
+    scp_flash_can_target_init(&flash_target, g_module_config.module_id);
 
     pressure_sensor_init(pressure_sensor_adc_gpio);
     const pressure_display_spi_pins_t lcd_pins = {
@@ -271,7 +276,10 @@ int main(void) {
             next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
         }
 
-        if (scp_can_try_read(&can_bus, &rx_msg)) {
+        while (scp_can_try_read(&can_bus, &rx_msg)) {
+            if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
+                continue;
+            }
             pressure_display_unit_t requested_unit = display_unit;
             if (try_parse_set_display_unit_command(&rx_msg, &requested_unit) && requested_unit != display_unit) {
                 display_unit = requested_unit;

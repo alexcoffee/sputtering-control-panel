@@ -5,8 +5,10 @@
 
 #include "module_config.h"
 #include "roughing_pump_can_messages.h"
+#include "scp/bootloader.h"
 #include "scp/can_messages.h"
 #include "scp/can_bus.h"
+#include "scp/flash_can.h"
 #include "scp/module_ids.h"
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
@@ -34,8 +36,10 @@ const scp_module_config_t g_module_config = {
 
 int main(void) {
     stdio_init_all();
+    (void)scp_bootloader_run_if_requested(&g_module_config, SCP_BOOTLOADER_DEFAULT_IDLE_TIMEOUT_MS);
 
     scp_can_bus_t can_bus;
+    scp_flash_can_target_t flash_target;
     scp_pico_gpio_map_t gpio_map;
     struct can2040_msg tx_msg;
     struct can2040_msg rx_msg;
@@ -102,6 +106,7 @@ int main(void) {
                       can_gpio_tx)) {
         return 2;
     }
+    scp_flash_can_target_init(&flash_target, g_module_config.module_id);
 
     bool last_switch_state = !gpio_get(switch_gpio);
     bool connection_ok = !gpio_get(connection_detect_gpio);
@@ -180,7 +185,10 @@ int main(void) {
             gpio_put(heartbeat_led_gpio, 0);
         }
 
-        if (scp_can_try_read(&can_bus, &rx_msg)) {
+        while (scp_can_try_read(&can_bus, &rx_msg)) {
+            if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
+                continue;
+            }
             printf("RX id=0x%lx dlc=%lx\n", (unsigned long) rx_msg.id, rx_msg.dlc);
         }
 

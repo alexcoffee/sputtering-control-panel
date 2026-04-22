@@ -6,11 +6,15 @@
 
 #include "can2040.h"
 
+#ifndef SCP_CAN_RX_QUEUE_CAPACITY
+#define SCP_CAN_RX_QUEUE_CAPACITY 128U
+#endif
+
 typedef struct {
     struct can2040 can;
     volatile uint8_t rx_head;
     volatile uint8_t rx_tail;
-    struct can2040_msg rx_queue[16];
+    struct can2040_msg rx_queue[SCP_CAN_RX_QUEUE_CAPACITY];
     int pio_num;
 } scp_can_bus_t;
 

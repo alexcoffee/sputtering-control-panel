@@ -24,3 +24,8 @@ Degas on = blinking
 Converting voltage to pressure
 ![img_1.png](assets/ion-gauge-adc.png)
 
+Measurement range: 0.7 V to 8.7 V
+Gauge disabled: 9.0 V
+Emission error: 9.5 V
+Over-pressure trip: 9.7 V
+

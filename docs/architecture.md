@@ -22,6 +22,10 @@ cmake --build build/all
 - Heartbeats use IDs `0x100 + module_id`.
 - Lower IDs are reserved for high-priority safety/fault traffic.
 - Keep all message IDs and wire formats in `shared/include/scp/protocol.h`.
+- Flash-over-CAN uses:
+  - Control: `0x300 + module_id`
+  - Data: `0x340 + module_id`
+  - Status: `0x380 + module_id`
 
 ## RJ45 Connector
 - Using standard LAN cable to connect modules to instruments/pumps.

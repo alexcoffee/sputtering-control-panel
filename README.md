@@ -96,3 +96,19 @@ python3 tools/check_module_pins.py --root .
 screen /dev/ttyACM0 115200
 Ctrl A, k
 ```
+
+## Flash Modules Over CAN (USB <-> CAN Bridge)
+Build and flash the `usb_can_bridge` firmware onto the bridge Pico:
+```bash
+./tools/build.sh usb_can_bridge
+./tools/auto_flash.sh usb_can_bridge
+```
+
+Then flash a target module over CAN with:
+```bash
+python3 tools/can_flash.py --port /dev/ttyACM0 --bin cmake-build-debug-eabi/modules/scp_pirani.bin --target-id 2
+```
+
+Notes:
+- The bridge forwards fixed-size binary USB packets to CAN for low overhead.
+- Flash transport uses CAN message IDs `0x300 + module_id` (control), `0x340 + module_id` (data), and `0x380 + module_id` (status).

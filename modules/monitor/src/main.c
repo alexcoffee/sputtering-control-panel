@@ -4,8 +4,10 @@
 #include "pico/stdlib.h"
 
 #include "module_config.h"
+#include "scp/bootloader.h"
 #include "scp/can_bus.h"
 #include "scp/can_messages.h"
+#include "scp/flash_can.h"
 #include "scp/module_ids.h"
 #include "touch_calibrator_display.h"
 
@@ -36,7 +38,7 @@ const scp_module_config_t g_module_config = {
     .module_name = "monitor",
     .module_id = SCP_MODULE_ID_MONITOR,
     .can_pio_num = 0,
-    .can_bitrate = 500000,
+    .can_bitrate = SCP_CAN_BITRATE,
     .gpio_assignments = g_gpio_assignments,
     .gpio_assignment_count = sizeof(g_gpio_assignments) / sizeof(g_gpio_assignments[0]),
 };
@@ -82,8 +84,10 @@ static bool try_get_spi_index_for_pin_triplet(uint8_t sck_pin, uint8_t tx_pin, u
 
 int main(void) {
     stdio_init_all();
+    (void)scp_bootloader_run_if_requested(&g_module_config, SCP_BOOTLOADER_DEFAULT_IDLE_TIMEOUT_MS);
 
     scp_can_bus_t can_bus;
+    scp_flash_can_target_t flash_target;
     scp_pico_gpio_map_t gpio_map;
     struct can2040_msg tx_msg;
     struct can2040_msg rx_msg;
@@ -172,6 +176,7 @@ int main(void) {
                       can_gpio_tx)) {
         return 2;
     }
+    scp_flash_can_target_init(&flash_target, g_module_config.module_id);
 
     const touch_calibrator_display_spi_pins_t lcd_pins = {
         .lcd_spi_index = lcd_spi_index,
@@ -203,43 +208,59 @@ int main(void) {
     while (true) {
         const absolute_time_t now = get_absolute_time();
         const uint32_t now_ms = to_ms_since_boot(now);
-        const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
-
-        if (elapsed_lvgl_ms != 0U) {
-            touch_calibrator_display_tick(elapsed_lvgl_ms);
-            last_lvgl_tick_ms = now_ms;
-        }
-        touch_calibrator_display_task_handler();
+        bool flash_active = flash_target.session_active || flash_target.image_ready;
 
         while (scp_can_try_read(&can_bus, &rx_msg)) {
-            touch_calibrator_display_handle_can_message(&rx_msg, now_ms);
+            if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
+                flash_active = flash_target.session_active || flash_target.image_ready;
+                continue;
+            }
+            if (!flash_active) {
+                touch_calibrator_display_handle_can_message(&rx_msg, now_ms);
+            }
         }
 
-        uint8_t requested_display_unit = 0U;
-        if (touch_calibrator_display_take_pressure_unit_command(&requested_display_unit)) {
-            build_set_display_unit_command(&tx_msg,
-                                           g_module_config.module_id,
-                                           SCP_MODULE_ID_ION_GAUGE,
-                                           requested_display_unit);
-            (void) scp_can_transmit(&can_bus, &tx_msg);
+        if (!flash_active) {
+            const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
+            if (elapsed_lvgl_ms != 0U) {
+                touch_calibrator_display_tick(elapsed_lvgl_ms);
+                last_lvgl_tick_ms = now_ms;
+            }
+            touch_calibrator_display_task_handler();
 
-            build_set_display_unit_command(&tx_msg,
-                                           g_module_config.module_id,
-                                           SCP_MODULE_ID_PIRANI,
-                                           requested_display_unit);
-            (void) scp_can_transmit(&can_bus, &tx_msg);
+            uint8_t requested_display_unit = 0U;
+            if (touch_calibrator_display_take_pressure_unit_command(&requested_display_unit)) {
+                build_set_display_unit_command(&tx_msg,
+                                               g_module_config.module_id,
+                                               SCP_MODULE_ID_ION_GAUGE,
+                                               requested_display_unit);
+                (void) scp_can_transmit(&can_bus, &tx_msg);
+
+                build_set_display_unit_command(&tx_msg,
+                                               g_module_config.module_id,
+                                               SCP_MODULE_ID_PIRANI,
+                                               requested_display_unit);
+                (void) scp_can_transmit(&can_bus, &tx_msg);
+            }
+
+            if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
+                build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
+                (void)scp_can_transmit(&can_bus, &tx_msg);
+                next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
+
+                gpio_put(heartbeat_led_gpio, 1);
+                sleep_us(SCP_LED_FLASH_PULSE_US);
+                gpio_put(heartbeat_led_gpio, 0);
+            }
+
+            sleep_us(100);
+        } else {
+            if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
+                build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
+                (void)scp_can_transmit(&can_bus, &tx_msg);
+                next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
+            }
+            sleep_us(20);
         }
-
-        if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
-            build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
-            (void)scp_can_transmit(&can_bus, &tx_msg);
-            next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
-
-            gpio_put(heartbeat_led_gpio, 1);
-            sleep_us(SCP_LED_FLASH_PULSE_US);
-            gpio_put(heartbeat_led_gpio, 0);
-        }
-
-        sleep_us(100);
     }
 }

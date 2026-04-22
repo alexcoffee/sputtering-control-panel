@@ -18,6 +18,9 @@ function(scp_add_module module_dir target_name)
         pico_stdlib
     )
 
+    pico_set_binary_type(${target_name} default)
+    pico_set_linker_script(${target_name} ${CMAKE_SOURCE_DIR}/shared/ld/memmap_default_bootloader_ram.ld)
+
     if(target_name STREQUAL "scp_pirani" OR target_name STREQUAL "scp_ion_gauge" OR target_name STREQUAL "scp_turbo_pump")
         target_sources(${target_name} PRIVATE
             ${CMAKE_SOURCE_DIR}/lv_drivers/display/GC9A01.c
@@ -41,7 +44,6 @@ function(scp_add_module module_dir target_name)
             hardware_flash
         )
 
-        pico_set_binary_type(${target_name} default)
     endif()
 
     pico_enable_stdio_uart(${target_name} 0)
@@ -92,6 +94,7 @@ set(SCP_ALL_MODULES
     turbo_pump
     roughing_pump
     monitor
+    usb_can_bridge
 )
 
 if(NOT DEFINED SCP_BUILD_ALL_MODULES)
