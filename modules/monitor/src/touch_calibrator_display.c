@@ -149,6 +149,7 @@ static lv_obj_t *s_event_log_label;
 static lv_obj_t *s_settings_status_label;
 static lv_obj_t *s_brightness_value_label;
 static lv_obj_t *s_unit_status_label;
+static lv_obj_t *s_can_retransmit_label;
 static lv_obj_t *s_start_calibration_btn;
 static lv_obj_t *s_brightness_slider;
 static lv_obj_t *s_unit_torr_btn;
@@ -164,6 +165,7 @@ static monitor_connection_row_t s_connection_rows[MONITOR_MAX_CONNECTION_ROWS];
 static char s_event_lines[MONITOR_EVENT_MAX_LINES][MONITOR_EVENT_LINE_CHARS];
 static char s_event_log_text[MONITOR_EVENT_TEXT_CHARS];
 static uint8_t s_event_line_count;
+static bool s_event_log_dirty;
 
 static touch_calibration_point_t s_points[TOUCH_CALIBRATION_POINT_COUNT];
 static touch_calibration_transform_t s_transform;
@@ -1266,7 +1268,7 @@ static void push_event_line(const char *line) {
     if (s_event_line_count < MONITOR_EVENT_MAX_LINES) {
         s_event_line_count++;
     }
-    refresh_event_log_label();
+    s_event_log_dirty = true;
 }
 
 static const char *event_name_from_code(uint8_t code) {
@@ -1833,6 +1835,14 @@ static void build_ui(void) {
     lv_label_set_long_mode(s_unit_status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_unit_status_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
     update_pressure_unit_controls();
+
+    s_can_retransmit_label = lv_label_create(tab_settings);
+    lv_obj_set_width(s_can_retransmit_label, TOUCH_CALIBRATOR_DISP_HOR_RES - 20);
+    lv_obj_align(s_can_retransmit_label, LV_ALIGN_TOP_LEFT, 8, 258);
+    lv_label_set_long_mode(s_can_retransmit_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(s_can_retransmit_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
+    lv_label_set_text(s_can_retransmit_label, "CAN retransmitted packets: 0");
+
     monitor_settings_clear_focus();
 
     lv_obj_t *flash_label = lv_label_create(tab_settings);
@@ -1940,6 +1950,7 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     memset(&s_connection_rows, 0, sizeof(s_connection_rows));
     memset(&s_event_lines, 0, sizeof(s_event_lines));
     s_event_line_count = 0U;
+    s_event_log_dirty = true;
     s_mode = MONITOR_MODE_UI;
     s_last_touch_point = (lv_point_t){0, 0};
     s_encoder_available = false;
@@ -1956,6 +1967,7 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     s_unit_torr_btn = NULL;
     s_unit_bar_btn = NULL;
     s_unit_voltage_btn = NULL;
+    s_can_retransmit_label = NULL;
     s_selected_pressure_unit = SCP_DISPLAY_UNIT_TORR;
     s_pressure_unit_command_pending = true;
 
@@ -2030,6 +2042,10 @@ void touch_calibrator_display_task_handler(void) {
         update_calibration();
     } else {
         refresh_connection_rows(now_ms);
+        if (s_event_log_dirty) {
+            refresh_event_log_label();
+            s_event_log_dirty = false;
+        }
     }
 
     (void) lv_timer_handler();
@@ -2055,6 +2071,19 @@ void touch_calibrator_display_handle_can_message(const struct can2040_msg *msg, 
     char line[MONITOR_EVENT_LINE_CHARS];
     format_can_event_line(msg, uptime_ms, line, sizeof(line));
     push_event_line(line);
+}
+
+void touch_calibrator_display_set_can_retransmit_count(uint32_t retransmit_count) {
+    if (s_can_retransmit_label == NULL) {
+        return;
+    }
+
+    char can_text[64];
+    (void) snprintf(can_text,
+                    sizeof(can_text),
+                    "CAN retransmitted packets: %lu",
+                    (unsigned long) retransmit_count);
+    lv_label_set_text(s_can_retransmit_label, can_text);
 }
 
 bool touch_calibrator_display_take_pressure_unit_command(uint8_t *unit_out) {

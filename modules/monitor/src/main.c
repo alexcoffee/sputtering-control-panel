@@ -11,6 +11,10 @@
 #include "scp/module_ids.h"
 #include "touch_calibrator_display.h"
 
+#define MONITOR_CAN_METRICS_PERIOD_MS 250U
+#define MONITOR_CAN_RX_BUDGET_UI_LOOP 24U
+#define MONITOR_CAN_RX_BUDGET_FLASH_LOOP 96U
+
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SIGNAL_HEARTBEAT_LED, 25},
 
@@ -202,21 +206,34 @@ int main(void) {
     printf("%s online (module_id=%u)\n", g_module_config.module_name, g_module_config.module_id);
 
     absolute_time_t next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
+    absolute_time_t next_can_metrics_update = make_timeout_time_ms(0U);
     uint8_t heartbeat_counter = 0;
     uint32_t last_lvgl_tick_ms = to_ms_since_boot(get_absolute_time());
+    uint32_t last_can_retransmit_count = 0U;
+    bool can_retransmit_count_valid = false;
+    uint32_t can_retransmit_count = 0U;
+    struct can2040_stats prev_can_stats = {0U, 0U, 0U, 0U};
+    bool prev_can_stats_valid = false;
 
     while (true) {
         const absolute_time_t now = get_absolute_time();
         const uint32_t now_ms = to_ms_since_boot(now);
         bool flash_active = flash_target.session_active || flash_target.image_ready;
+        bool can_rx_budget_exhausted = false;
+        uint16_t can_frames_processed = 0U;
 
         while (scp_can_try_read(&can_bus, &rx_msg)) {
             if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
                 flash_active = flash_target.session_active || flash_target.image_ready;
-                continue;
-            }
-            if (!flash_active) {
+            } else if (!flash_active) {
                 touch_calibrator_display_handle_can_message(&rx_msg, now_ms);
+            }
+
+            can_frames_processed++;
+            const uint16_t can_rx_budget = flash_active ? MONITOR_CAN_RX_BUDGET_FLASH_LOOP : MONITOR_CAN_RX_BUDGET_UI_LOOP;
+            if (can_frames_processed >= can_rx_budget) {
+                can_rx_budget_exhausted = true;
+                break;
             }
         }
 
@@ -227,6 +244,31 @@ int main(void) {
                 last_lvgl_tick_ms = now_ms;
             }
             touch_calibrator_display_task_handler();
+
+            if (absolute_time_diff_us(now, next_can_metrics_update) <= 0) {
+                struct can2040_stats can_stats;
+                can2040_get_statistics(&can_bus.can, &can_stats);
+
+                if (prev_can_stats_valid) {
+                    if (can_stats.tx_attempt >= prev_can_stats.tx_attempt
+                        && can_stats.tx_total >= prev_can_stats.tx_total) {
+                        const uint32_t delta_tx_attempt = can_stats.tx_attempt - prev_can_stats.tx_attempt;
+                        const uint32_t delta_tx_total = can_stats.tx_total - prev_can_stats.tx_total;
+                        if (delta_tx_total > 0U && delta_tx_attempt > delta_tx_total) {
+                            can_retransmit_count += delta_tx_attempt - delta_tx_total;
+                        }
+                    }
+                }
+                prev_can_stats = can_stats;
+                prev_can_stats_valid = true;
+
+                if (!can_retransmit_count_valid || can_retransmit_count != last_can_retransmit_count) {
+                    touch_calibrator_display_set_can_retransmit_count(can_retransmit_count);
+                    last_can_retransmit_count = can_retransmit_count;
+                    can_retransmit_count_valid = true;
+                }
+                next_can_metrics_update = make_timeout_time_ms(MONITOR_CAN_METRICS_PERIOD_MS);
+            }
 
             uint8_t requested_display_unit = 0U;
             if (touch_calibrator_display_take_pressure_unit_command(&requested_display_unit)) {
@@ -253,14 +295,14 @@ int main(void) {
                 gpio_put(heartbeat_led_gpio, 0);
             }
 
-            sleep_us(100);
+            sleep_us(can_rx_budget_exhausted ? 20U : 100U);
         } else {
             if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
                 build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
                 (void)scp_can_transmit(&can_bus, &tx_msg);
                 next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
             }
-            sleep_us(20);
+            sleep_us(can_rx_budget_exhausted ? 10U : 20U);
         }
     }
 }

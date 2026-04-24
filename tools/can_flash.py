@@ -17,6 +17,9 @@ USB_CAN_PACKET_SIZE = 16
 
 USB_CAN_PACKET_TYPE_CAN_TX = 1
 USB_CAN_PACKET_TYPE_CAN_RX = 129
+USB_CAN_PACKET_TYPE_STATUS = 128
+
+USB_CAN_STATUS_TX_FAILED = 1
 
 SCP_PROTOCOL_VERSION = 1
 SCP_MSG_FLASH_CONTROL_BASE = 0x300
@@ -48,6 +51,11 @@ SCP_FLASH_DELAY_STEP_UP_US = 80
 SCP_FLASH_DELAY_STEP_DOWN_US = 20
 SCP_FLASH_STABLE_WINDOWS_FOR_SPEEDUP = 6
 SCP_FLASH_MAX_PROGRESS_TIMEOUTS = 12
+SCP_FLASH_PROGRESS_WAIT_TIMEOUT_S = 4.0
+SCP_FLASH_MAX_BRIDGE_TX_FAILURES = 80
+SCP_FLASH_CONTROL_RETRY_ATTEMPTS = 4
+SCP_FLASH_CONTROL_RETRY_BACKOFF_S = 0.12
+SCP_FLASH_TOOL_REV = "2026-04-23-a"
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,6 +185,16 @@ def parse_can_rx_packet(packet: bytes):
     return can_id, dlc, data
 
 
+def parse_usb_status_packet(packet: bytes):
+    if len(packet) != USB_CAN_PACKET_SIZE:
+        return None
+    if packet[:2] != USB_CAN_PACKET_MAGIC or packet[2] != USB_CAN_PACKET_TYPE_STATUS:
+        return None
+    status_code = packet[3]
+    argument = struct.unpack_from("<I", packet, 8)[0]
+    return status_code, argument
+
+
 def send_flash_control(ser, source_id: int, target_id: int, command: int, session_id: int, argument: int):
     can_id = SCP_MSG_FLASH_CONTROL_BASE + target_id
     frame = bytes(
@@ -190,10 +208,72 @@ def send_flash_control(ser, source_id: int, target_id: int, command: int, sessio
     ser.write(build_usb_can_tx_frame(can_id, 8, frame))
 
 
+def flash_command_name(command: int) -> str:
+    names = {
+        SCP_FLASH_COMMAND_BEGIN: "BEGIN",
+        SCP_FLASH_COMMAND_FINISH: "FINISH",
+        SCP_FLASH_COMMAND_COMMIT: "COMMIT",
+        SCP_FLASH_COMMAND_ABORT: "ABORT",
+        SCP_FLASH_COMMAND_REBOOT_TO_BOOTLOADER: "REBOOT_TO_BOOTLOADER",
+    }
+    return names.get(command, f"cmd_{command}")
+
+
 def send_flash_data(ser, target_id: int, session_id: int, sequence: int, payload: bytes):
     can_id = SCP_MSG_FLASH_DATA_BASE + target_id
     frame = bytes([session_id & 0xFF, sequence & 0xFF]) + payload.ljust(SCP_FLASH_DATA_BYTES_PER_FRAME, b"\xFF")
     ser.write(build_usb_can_tx_frame(can_id, 8, frame))
+
+
+def send_flash_control_with_status_retry(
+    ser,
+    sync: bytearray,
+    source_id: int,
+    target_id: int,
+    command: int,
+    session_id: int,
+    argument: int,
+    expected_statuses: set[int],
+    timeout_s: float,
+    min_progress: int = 0,
+    diagnostics: dict | None = None,
+    max_attempts: int = SCP_FLASH_CONTROL_RETRY_ATTEMPTS,
+):
+    last_timeout = None
+
+    for attempt in range(1, max_attempts + 1):
+        tx_failed_before = diagnostics.get("bridge_tx_failed", 0) if diagnostics is not None else 0
+
+        send_flash_control(ser, source_id, target_id, command, session_id, argument)
+        try:
+            return wait_for_flash_status(
+                ser,
+                sync,
+                target_id,
+                session_id,
+                expected_statuses,
+                timeout_s=timeout_s,
+                min_progress=min_progress,
+                diagnostics=diagnostics,
+            )
+        except TimeoutError as exc:
+            last_timeout = exc
+            tx_failed_after = diagnostics.get("bridge_tx_failed", 0) if diagnostics is not None else 0
+            saw_new_bridge_tx_failure = tx_failed_after > tx_failed_before
+            if not saw_new_bridge_tx_failure or attempt >= max_attempts:
+                break
+
+            print(
+                f"\nRetrying flash control {flash_command_name(command)} "
+                f"after bridge TX failure ({attempt}/{max_attempts}).",
+                file=sys.stderr,
+            )
+            sync.clear()
+            time.sleep(SCP_FLASH_CONTROL_RETRY_BACKOFF_S)
+
+    if last_timeout is None:
+        raise TimeoutError(f"Timed out waiting for flash status {sorted(expected_statuses)}")
+    raise last_timeout
 
 
 def render_progress(done: int, total: int, resync_count: int, elapsed_s: float, frame_delay_us: int):
@@ -218,12 +298,34 @@ def wait_for_flash_status(
     expected_statuses: set[int],
     timeout_s: float,
     min_progress: int = 0,
+    diagnostics: dict | None = None,
 ):
     status_id = SCP_MSG_FLASH_STATUS_BASE + target_id
+    flash_control_id = SCP_MSG_FLASH_CONTROL_BASE + target_id
+    flash_data_id = SCP_MSG_FLASH_DATA_BASE + target_id
     deadline = time.monotonic() + timeout_s
     latest_progress = None
 
     for packet in iter_usb_packets(ser, sync, deadline):
+        status_packet = parse_usb_status_packet(packet)
+        if status_packet is not None:
+            status_code, argument = status_packet
+            if status_code == USB_CAN_STATUS_TX_FAILED and argument in (flash_control_id, flash_data_id):
+                if diagnostics is not None:
+                    count = diagnostics.get("bridge_tx_failed", 0) + 1
+                    diagnostics["bridge_tx_failed"] = count
+                    if count in (1, 8, 24):
+                        print(
+                            f"\nBridge TX failures detected on CAN ID 0x{argument:03X} (count={count}).",
+                            file=sys.stderr,
+                        )
+                    if count >= SCP_FLASH_MAX_BRIDGE_TX_FAILURES:
+                        raise RuntimeError(
+                            "Bridge reported repeated CAN TX failures while flashing. "
+                            "Check CAN wiring/termination and isolate the target module on the bus."
+                        )
+            continue
+
         decoded = parse_can_rx_packet(packet)
         if decoded is None:
             continue
@@ -249,31 +351,52 @@ def wait_for_flash_status(
     raise TimeoutError(f"Timed out waiting for flash status {sorted(expected_statuses)}")
 
 
-def abort_flash_session(ser, sync: bytearray, source_id: int, target_id: int, session_id: int):
-    send_flash_control(ser, source_id, target_id, SCP_FLASH_COMMAND_ABORT, session_id, 0)
+def abort_flash_session(
+    ser,
+    sync: bytearray,
+    source_id: int,
+    target_id: int,
+    session_id: int,
+    diagnostics: dict | None = None,
+):
     try:
-        wait_for_flash_status(
+        send_flash_control_with_status_retry(
             ser,
             sync,
+            source_id,
             target_id,
+            SCP_FLASH_COMMAND_ABORT,
             session_id,
+            0,
             {SCP_FLASH_STATUS_ACK, SCP_FLASH_STATUS_ERROR},
             timeout_s=1.0,
+            diagnostics=diagnostics,
+            max_attempts=2,
         )
     except TimeoutError:
         pass
 
 
-def try_reboot_into_bootloader(ser, sync: bytearray, source_id: int, target_id: int, session_id: int) -> bool:
-    send_flash_control(ser, source_id, target_id, SCP_FLASH_COMMAND_REBOOT_TO_BOOTLOADER, session_id, 0)
+def try_reboot_into_bootloader(
+    ser,
+    sync: bytearray,
+    source_id: int,
+    target_id: int,
+    session_id: int,
+    diagnostics: dict | None = None,
+) -> bool:
     try:
-        status, arg, _ = wait_for_flash_status(
+        status, arg, _ = send_flash_control_with_status_retry(
             ser,
             sync,
+            source_id,
             target_id,
+            SCP_FLASH_COMMAND_REBOOT_TO_BOOTLOADER,
             session_id,
+            0,
             {SCP_FLASH_STATUS_ACK, SCP_FLASH_STATUS_ERROR},
             timeout_s=1.5,
+            diagnostics=diagnostics,
         )
     except TimeoutError:
         return False
@@ -285,6 +408,13 @@ def try_reboot_into_bootloader(ser, sync: bytearray, source_id: int, target_id: 
         return True
 
     if arg == SCP_FLASH_ERROR_INVALID_ARGUMENT:
+        return False
+
+    if arg == 1:
+        print(
+            "Bootloader reboot command returned error code=1 (INVALID_STATE). "
+            "Target likely has an active flash session in RAM; power-cycle the target module to clear it."
+        )
         return False
 
     print(f"Bootloader reboot command returned error code={arg}; continuing without reboot.")
@@ -299,42 +429,51 @@ def query_progress_via_finish_probe(
     session_id: int,
     image_crc32: int,
     min_progress: int,
+    diagnostics: dict | None = None,
 ):
     send_flash_control(ser, source_id, target_id, SCP_FLASH_COMMAND_FINISH, session_id, image_crc32)
-    try:
-        status, arg, latest_progress = wait_for_flash_status(
-            ser,
-            sync,
-            target_id,
-            session_id,
-            {SCP_FLASH_STATUS_PROGRESS, SCP_FLASH_STATUS_ERROR},
-            timeout_s=2.0,
-            min_progress=min_progress,
-        )
-    except TimeoutError:
-        return None
+    deadline = time.monotonic() + 2.0
+    saw_image_incomplete = False
+    best_progress = None
 
-    if status == SCP_FLASH_STATUS_PROGRESS:
-        return arg
-
-    if arg == SCP_FLASH_ERROR_IMAGE_INCOMPLETE:
-        if latest_progress is not None:
-            return latest_progress
+    # A FINISH probe in the middle of transfer should yield IMAGE_INCOMPLETE and
+    # then PROGRESS. Status frames may be delayed/reordered in the host buffer, so
+    # keep polling briefly to consume both and avoid leaking stale ERROR=7 frames.
+    while time.monotonic() < deadline:
+        timeout_s = max(0.05, deadline - time.monotonic())
         try:
-            _, progress, _ = wait_for_flash_status(
+            status, arg, latest_progress = wait_for_flash_status(
                 ser,
                 sync,
                 target_id,
                 session_id,
-                {SCP_FLASH_STATUS_PROGRESS},
-                timeout_s=2.0,
+                {SCP_FLASH_STATUS_PROGRESS, SCP_FLASH_STATUS_ERROR},
+                timeout_s=timeout_s,
                 min_progress=min_progress,
+                diagnostics=diagnostics,
             )
-            return progress
         except TimeoutError:
-            return None
+            break
 
-    return None
+        if latest_progress is not None and (best_progress is None or latest_progress > best_progress):
+            best_progress = latest_progress
+
+        if status == SCP_FLASH_STATUS_PROGRESS:
+            if best_progress is None or arg > best_progress:
+                best_progress = arg
+            if saw_image_incomplete:
+                break
+            continue
+
+        if arg == SCP_FLASH_ERROR_IMAGE_INCOMPLETE:
+            saw_image_incomplete = True
+            if best_progress is not None:
+                break
+            continue
+
+        return None
+
+    return best_progress
 
 
 def flash_image(
@@ -352,23 +491,35 @@ def flash_image(
     total_size = len(image)
     image_crc32 = zlib.crc32(image) & 0xFFFFFFFF
     print(f"Target module: {target_id}")
+    print(f"Tool revision: {SCP_FLASH_TOOL_REV}")
     print(f"Session ID: {session_id}")
     print(f"Image size: {total_size} bytes")
     print(f"Image CRC32: 0x{image_crc32:08X}")
 
     packet_sync = bytearray()
+    diagnostics = {"bridge_tx_failed": 0}
     confirmed_progress = 0
     setup_session_id = (session_id + 97) & 0xFF
 
-    abort_flash_session(ser, packet_sync, source_id, target_id, setup_session_id)
-    if bootloader_reboot and try_reboot_into_bootloader(ser, packet_sync, source_id, target_id, setup_session_id):
-        abort_flash_session(ser, packet_sync, source_id, target_id, setup_session_id)
+    abort_flash_session(ser, packet_sync, source_id, target_id, setup_session_id, diagnostics=diagnostics)
+    if bootloader_reboot and try_reboot_into_bootloader(
+        ser, packet_sync, source_id, target_id, setup_session_id, diagnostics=diagnostics
+    ):
+        abort_flash_session(ser, packet_sync, source_id, target_id, setup_session_id, diagnostics=diagnostics)
     time.sleep(0.02)
     packet_sync.clear()
 
-    send_flash_control(ser, source_id, target_id, SCP_FLASH_COMMAND_BEGIN, session_id, total_size)
-    status, arg, _ = wait_for_flash_status(
-        ser, packet_sync, target_id, session_id, {SCP_FLASH_STATUS_ACK, SCP_FLASH_STATUS_ERROR}, timeout_s=20.0
+    status, arg, _ = send_flash_control_with_status_retry(
+        ser,
+        packet_sync,
+        source_id,
+        target_id,
+        SCP_FLASH_COMMAND_BEGIN,
+        session_id,
+        total_size,
+        {SCP_FLASH_STATUS_ACK, SCP_FLASH_STATUS_ERROR},
+        timeout_s=20.0,
+        diagnostics=diagnostics,
     )
     if status == SCP_FLASH_STATUS_ERROR:
         raise RuntimeError(f"BEGIN rejected, error code={arg}")
@@ -421,8 +572,9 @@ def flash_image(
                         target_id,
                         session_id,
                         {SCP_FLASH_STATUS_PROGRESS, SCP_FLASH_STATUS_ERROR},
-                        timeout_s=2.0,
+                        timeout_s=SCP_FLASH_PROGRESS_WAIT_TIMEOUT_S,
                         min_progress=confirmed_progress,
+                        diagnostics=diagnostics,
                     )
                 except TimeoutError:
                     latest_progress = query_progress_via_finish_probe(
@@ -433,6 +585,7 @@ def flash_image(
                         session_id,
                         image_crc32,
                         confirmed_progress,
+                        diagnostics=diagnostics,
                     )
                     if latest_progress is None:
                         progress_timeout_count += 1
@@ -471,7 +624,7 @@ def flash_image(
                     confirmed_progress = latest_progress
 
                 if status == SCP_FLASH_STATUS_ERROR:
-                    if arg == SCP_FLASH_ERROR_BAD_SEQUENCE:
+                    if arg in (SCP_FLASH_ERROR_BAD_SEQUENCE, SCP_FLASH_ERROR_IMAGE_INCOMPLETE):
                         try:
                             _, progress_arg, _ = wait_for_flash_status(
                                 ser,
@@ -481,21 +634,24 @@ def flash_image(
                                 {SCP_FLASH_STATUS_PROGRESS},
                                 timeout_s=0.25,
                                 min_progress=confirmed_progress,
+                                diagnostics=diagnostics,
                             )
                             if progress_arg > confirmed_progress:
                                 confirmed_progress = progress_arg
                         except TimeoutError:
-                            latest_progress = query_progress_via_finish_probe(
-                                ser,
-                                packet_sync,
-                                source_id,
-                                target_id,
-                                session_id,
-                                image_crc32,
-                                confirmed_progress,
-                            )
-                            if latest_progress is not None and latest_progress > confirmed_progress:
-                                confirmed_progress = latest_progress
+                            if arg == SCP_FLASH_ERROR_BAD_SEQUENCE:
+                                latest_progress = query_progress_via_finish_probe(
+                                    ser,
+                                    packet_sync,
+                                    source_id,
+                                    target_id,
+                                    session_id,
+                                    image_crc32,
+                                    confirmed_progress,
+                                    diagnostics=diagnostics,
+                                )
+                                if latest_progress is not None and latest_progress > confirmed_progress:
+                                    confirmed_progress = latest_progress
                         if confirmed_progress > 0:
                             resync_count += 1
                             offset = min(confirmed_progress, total_size)
@@ -512,6 +668,20 @@ def flash_image(
                             )
                             time.sleep(0.005)
                             continue
+                        if arg == SCP_FLASH_ERROR_IMAGE_INCOMPLETE:
+                            # Mid-transfer IMAGE_INCOMPLETE can be a delayed response from a FINISH probe.
+                            # Keep going rather than aborting the transfer.
+                            frames_since_sync = 0
+                            tune_delay(True)
+                            elapsed_s = time.monotonic() - start_time
+                            render_progress(
+                                confirmed_progress,
+                                total_size,
+                                resync_count,
+                                elapsed_s,
+                                current_delay_us,
+                            )
+                            continue
                     raise RuntimeError(f"DATA rejected, error code={arg}")
 
                 frames_since_sync = 0
@@ -527,16 +697,32 @@ def flash_image(
         sys.stdout.write("\n")
         sys.stdout.flush()
 
-    send_flash_control(ser, source_id, target_id, SCP_FLASH_COMMAND_FINISH, session_id, image_crc32)
-    status, arg, _ = wait_for_flash_status(
-        ser, packet_sync, target_id, session_id, {SCP_FLASH_STATUS_READY, SCP_FLASH_STATUS_ERROR}, timeout_s=5.0
+    status, arg, _ = send_flash_control_with_status_retry(
+        ser,
+        packet_sync,
+        source_id,
+        target_id,
+        SCP_FLASH_COMMAND_FINISH,
+        session_id,
+        image_crc32,
+        {SCP_FLASH_STATUS_READY, SCP_FLASH_STATUS_ERROR},
+        timeout_s=5.0,
+        diagnostics=diagnostics,
     )
     if status == SCP_FLASH_STATUS_ERROR:
         raise RuntimeError(f"FINISH rejected, error code={arg}")
 
-    send_flash_control(ser, source_id, target_id, SCP_FLASH_COMMAND_COMMIT, session_id, 0)
-    status, arg, _ = wait_for_flash_status(
-        ser, packet_sync, target_id, session_id, {SCP_FLASH_STATUS_COMMITTING, SCP_FLASH_STATUS_ERROR}, timeout_s=5.0
+    status, arg, _ = send_flash_control_with_status_retry(
+        ser,
+        packet_sync,
+        source_id,
+        target_id,
+        SCP_FLASH_COMMAND_COMMIT,
+        session_id,
+        0,
+        {SCP_FLASH_STATUS_COMMITTING, SCP_FLASH_STATUS_ERROR},
+        timeout_s=5.0,
+        diagnostics=diagnostics,
     )
     if status == SCP_FLASH_STATUS_ERROR:
         raise RuntimeError(f"COMMIT rejected, error code={arg}")

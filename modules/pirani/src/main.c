@@ -196,8 +196,32 @@ int main(void) {
     while (true) {
         const absolute_time_t now = get_absolute_time();
         const uint32_t now_ms = to_ms_since_boot(now);
-        const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
+        bool flash_active = flash_target.session_active || flash_target.image_ready;
 
+        while (scp_can_try_read(&can_bus, &rx_msg)) {
+            if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
+                flash_active = flash_target.session_active || flash_target.image_ready;
+                continue;
+            }
+            pressure_display_unit_t requested_unit = display_unit;
+            if (try_parse_set_display_unit_command(&rx_msg, &requested_unit) && requested_unit != display_unit) {
+                display_unit = requested_unit;
+                printf("\nunit changed via CAN: %s\n", pressure_unit_name(display_unit));
+                fflush(stdout);
+            }
+        }
+
+        if (flash_active) {
+            if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
+                build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
+                (void) scp_can_transmit(&can_bus, &tx_msg);
+                next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
+            }
+            sleep_us(20);
+            continue;
+        }
+
+        const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
         if (elapsed_lvgl_ms != 0U) {
             pressure_display_tick(elapsed_lvgl_ms);
             last_lvgl_tick_ms = now_ms;
@@ -242,25 +266,12 @@ int main(void) {
             next_pressure_transmit = make_timeout_time_ms(PRESSURE_TRANSMIT_PERIOD_MS);
         }
 
-        // heartbeat
         if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
             build_heartbeat(&tx_msg, g_module_config.module_id, heartbeat_counter++, now_ms);
             (void) scp_can_transmit(&can_bus, &tx_msg);
             printf(".");
             fflush(stdout);
             next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
-        }
-
-        while (scp_can_try_read(&can_bus, &rx_msg)) {
-            if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
-                continue;
-            }
-            pressure_display_unit_t requested_unit = display_unit;
-            if (try_parse_set_display_unit_command(&rx_msg, &requested_unit) && requested_unit != display_unit) {
-                display_unit = requested_unit;
-                printf("\nunit changed via CAN: %s\n", pressure_unit_name(display_unit));
-                fflush(stdout);
-            }
         }
 
         sleep_us(10);
