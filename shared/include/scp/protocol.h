@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define SCP_PROTOCOL_VERSION 1U
-#define SCP_CAN_BITRATE 700000U
+#define SCP_CAN_BITRATE 500000U
 
 enum {
     SCP_MSG_HEARTBEAT_BASE = 0x100,

@@ -86,7 +86,7 @@ const scp_module_config_t g_module_config = {
     .module_name = "pirani",
     .module_id = SCP_MODULE_ID_PIRANI,
     .can_pio_num = 0,
-    .can_bitrate = 500000,
+    .can_bitrate = SCP_CAN_BITRATE,
     .gpio_assignments = g_gpio_assignments,
     .gpio_assignment_count = sizeof(g_gpio_assignments) / sizeof(g_gpio_assignments[0]),
 };
