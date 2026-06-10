@@ -8,6 +8,7 @@
 #define CURRENT_DISP_VER_RES 240
 #define CURRENT_GAUGE_MAX 5.0f
 #define CURRENT_GAUGE_VOLTS_PER_AMP 2.0f
+#define POWER_GAUGE_MAX 150.0f
 #define CURRENT_GAUGE_DARK_GREY lv_palette_darken(LV_PALETTE_GREY, 3)
 #define CURRENT_GAUGE_ORANGE lv_palette_main(LV_PALETTE_ORANGE)
 
@@ -30,12 +31,12 @@ static void current_display_apply_arc_state(void) {
         lv_meter_set_indicator_start_value(s_meter, s_enabled_arc, 0);
         lv_meter_set_indicator_end_value(s_meter, s_enabled_arc, 0);
         lv_meter_set_indicator_start_value(s_meter, s_low_speed_arc, 0);
-        lv_meter_set_indicator_end_value(s_meter, s_low_speed_arc, (int32_t)CURRENT_GAUGE_MAX);
+        lv_meter_set_indicator_end_value(s_meter, s_low_speed_arc, (int32_t)POWER_GAUGE_MAX);
         lv_meter_set_indicator_start_value(s_meter, s_disabled_arc, 0);
         lv_meter_set_indicator_end_value(s_meter, s_disabled_arc, 0);
     } else if (s_turbo_enabled) {
         lv_meter_set_indicator_start_value(s_meter, s_enabled_arc, 0);
-        lv_meter_set_indicator_end_value(s_meter, s_enabled_arc, (int32_t)CURRENT_GAUGE_MAX);
+        lv_meter_set_indicator_end_value(s_meter, s_enabled_arc, (int32_t)POWER_GAUGE_MAX);
         lv_meter_set_indicator_start_value(s_meter, s_low_speed_arc, 0);
         lv_meter_set_indicator_end_value(s_meter, s_low_speed_arc, 0);
         lv_meter_set_indicator_start_value(s_meter, s_disabled_arc, 0);
@@ -46,7 +47,7 @@ static void current_display_apply_arc_state(void) {
         lv_meter_set_indicator_start_value(s_meter, s_low_speed_arc, 0);
         lv_meter_set_indicator_end_value(s_meter, s_low_speed_arc, 0);
         lv_meter_set_indicator_start_value(s_meter, s_disabled_arc, 0);
-        lv_meter_set_indicator_end_value(s_meter, s_disabled_arc, (int32_t)CURRENT_GAUGE_MAX);
+        lv_meter_set_indicator_end_value(s_meter, s_disabled_arc, (int32_t)POWER_GAUGE_MAX);
     }
 }
 
@@ -77,7 +78,7 @@ void current_display_init(const pressure_display_spi_pins_t *pins) {
     lv_obj_set_style_bg_color(s_meter, lv_color_white(), LV_PART_MAIN);
 
     lv_meter_scale_t *scale = lv_meter_add_scale(s_meter);
-    lv_meter_set_scale_range(s_meter, scale, 0, (int32_t)CURRENT_GAUGE_MAX, 270, 135);
+    lv_meter_set_scale_range(s_meter, scale, 0, (int32_t)POWER_GAUGE_MAX, 270, 135);
     lv_meter_set_scale_ticks(s_meter, scale, 6, 2, 10, lv_palette_main(LV_PALETTE_GREY));
     lv_meter_set_scale_major_ticks(s_meter, scale, 1, 3, 15, lv_color_black(), 10);
 
@@ -132,16 +133,16 @@ void current_display_render(float current_amps, float voltage, current_display_u
 
     current_display_apply_arc_state();
 
-    float gauge_value = current_amps;
+    float gauge_value = current_amps * TURBO_PUMP_BUS_VOLTAGE;
     if (unit == CURRENT_DISPLAY_UNIT_VOLTAGE) {
-        gauge_value = voltage / CURRENT_GAUGE_VOLTS_PER_AMP;
+        gauge_value = (voltage / CURRENT_GAUGE_VOLTS_PER_AMP) * TURBO_PUMP_BUS_VOLTAGE;
     }
 
     if (gauge_value < 0.0f) {
         gauge_value = 0.0f;
     }
-    if (gauge_value > CURRENT_GAUGE_MAX) {
-        gauge_value = CURRENT_GAUGE_MAX;
+    if (gauge_value > POWER_GAUGE_MAX) {
+        gauge_value = POWER_GAUGE_MAX;
     }
 
     lv_meter_set_indicator_value(s_meter, s_needle, (int32_t)gauge_value);

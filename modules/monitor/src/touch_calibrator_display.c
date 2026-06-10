@@ -51,9 +51,10 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define MONITOR_EVENT_MAX_LINES 42U
 #define MONITOR_EVENT_LINE_CHARS 96U
 #define MONITOR_EVENT_TEXT_CHARS ((MONITOR_EVENT_MAX_LINES * MONITOR_EVENT_LINE_CHARS) + MONITOR_EVENT_MAX_LINES + 1U)
-#define MONITOR_TAB_COUNT 3U
+#define MONITOR_TAB_COUNT 4U
 #define MONITOR_TAB_CONNECTIONS_INDEX 0U
-#define MONITOR_TAB_SETTINGS_INDEX 2U
+#define MONITOR_TAB_PRESSURE_INDEX 2U
+#define MONITOR_TAB_SETTINGS_INDEX 3U
 #define MONITOR_SETTINGS_FOCUSABLE_COUNT 5U
 #define MONITOR_ENCODER_SLIDER_STEP 1
 #define MONITOR_ENCODER_BUTTON_FALLBACK_PIN 17U
@@ -83,6 +84,7 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define MONITOR_UI_TITLE_COLOR 0x225EA8
 #define MONITOR_UI_TEXT_COLOR 0x1E2A36
 #define MONITOR_UI_TEXT_MUTED_COLOR 0x5A6F86
+#define TURBO_PUMP_BUS_VOLTAGE 54.0f
 
 #define TOUCH_CAL_FLASH_MAGIC 0x434C4254u /* "TBLC" */
 #define TOUCH_CAL_FLASH_VERSION 4u
@@ -130,6 +132,14 @@ typedef struct {
     lv_obj_t *text;
 } monitor_connection_row_t;
 
+typedef struct {
+    bool collapsible_reading;
+    uint8_t module_id;
+    uint8_t event_code;
+    char reading_text[24];
+    uint32_t repeat_count;
+} monitor_event_line_meta_t;
+
 typedef enum {
     MONITOR_MODE_UI = 0,
     MONITOR_MODE_CALIBRATION = 1
@@ -163,6 +173,7 @@ static lv_obj_t *s_marker;
 
 static monitor_connection_row_t s_connection_rows[MONITOR_MAX_CONNECTION_ROWS];
 static char s_event_lines[MONITOR_EVENT_MAX_LINES][MONITOR_EVENT_LINE_CHARS];
+static monitor_event_line_meta_t s_event_line_meta[MONITOR_EVENT_MAX_LINES];
 static char s_event_log_text[MONITOR_EVENT_TEXT_CHARS];
 static uint8_t s_event_line_count;
 static bool s_event_log_dirty;
@@ -252,6 +263,7 @@ static void on_pressure_unit_button_clicked(lv_event_t *event);
 static const char *friendly_module_name(uint8_t module_id);
 static bool is_connection_row_online(const monitor_connection_row_t *entry, uint32_t now_ms);
 static void clear_connection_row(monitor_connection_row_t *entry);
+static void format_uptime_hh_mm_ss(uint32_t uptime_ms, char *out, size_t out_len);
 
 static void ili9488_fill_color565(uint16_t color) {
     static uint8_t row_buf[TOUCH_CALIBRATOR_DISP_HOR_RES * 3];
@@ -1255,7 +1267,7 @@ static void refresh_event_log_label(void) {
     lv_label_set_text(s_event_log_label, s_event_log_text);
 }
 
-static void push_event_line(const char *line) {
+static void push_event_line_with_meta(const char *line, const monitor_event_line_meta_t *meta) {
     if (line == NULL || line[0] == '\0') {
         return;
     }
@@ -1263,12 +1275,61 @@ static void push_event_line(const char *line) {
     if (MONITOR_EVENT_MAX_LINES > 1U) {
         memmove(s_event_lines[1], s_event_lines[0],
                 (MONITOR_EVENT_MAX_LINES - 1U) * MONITOR_EVENT_LINE_CHARS);
+        memmove(s_event_line_meta + 1,
+                s_event_line_meta,
+                (MONITOR_EVENT_MAX_LINES - 1U) * sizeof(s_event_line_meta[0]));
     }
     (void) snprintf(s_event_lines[0], MONITOR_EVENT_LINE_CHARS, "%s", line);
+    if (meta != NULL) {
+        s_event_line_meta[0] = *meta;
+    } else {
+        memset(&s_event_line_meta[0], 0, sizeof(s_event_line_meta[0]));
+    }
     if (s_event_line_count < MONITOR_EVENT_MAX_LINES) {
         s_event_line_count++;
     }
     s_event_log_dirty = true;
+}
+
+static void push_event_line(const char *line) {
+    push_event_line_with_meta(line, NULL);
+}
+
+static void push_collapsible_event_line(const char *line,
+                                        uint8_t module_id,
+                                        uint8_t event_code,
+                                        const char *reading_text) {
+    if (line == NULL || line[0] == '\0' || reading_text == NULL || reading_text[0] == '\0') {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < s_event_line_count; ++i) {
+        monitor_event_line_meta_t *meta = &s_event_line_meta[i];
+        if (!meta->collapsible_reading || meta->module_id != module_id || meta->event_code != event_code) {
+            continue;
+        }
+
+        if (strncmp(meta->reading_text, reading_text, sizeof(meta->reading_text)) == 0) {
+            meta->repeat_count++;
+            (void) snprintf(s_event_lines[i],
+                            MONITOR_EVENT_LINE_CHARS,
+                            "%s x%lu",
+                            line,
+                            (unsigned long) meta->repeat_count);
+            s_event_log_dirty = true;
+            return;
+        }
+        break;
+    }
+
+    monitor_event_line_meta_t meta = {
+        .collapsible_reading = true,
+        .module_id = module_id,
+        .event_code = event_code,
+        .repeat_count = 1U,
+    };
+    (void) snprintf(meta.reading_text, sizeof(meta.reading_text), "%s", reading_text);
+    push_event_line_with_meta(line, &meta);
 }
 
 static const char *event_name_from_code(uint8_t code) {
@@ -1280,9 +1341,9 @@ static const char *event_name_from_code(uint8_t code) {
         case SCP_EVENT_CONNECTION_LOST:
             return "connection_lost";
         case SCP_EVENT_PRESSURE_READING:
-            return "pressure_reading";
-        case SCP_EVENT_CURRENT_READING:
-            return "current_reading";
+            return "pressure";
+        case SCP_EVENT_POWER_READING:
+            return "power";
         default:
             return "event_unknown";
     }
@@ -1340,6 +1401,164 @@ static const char *module_abbreviation(uint8_t module_id) {
     }
 }
 
+static uint32_t read_u32_le(const uint8_t data[4]) {
+    return ((uint32_t) data[0])
+           | ((uint32_t) data[1] << 8U)
+           | ((uint32_t) data[2] << 16U)
+           | ((uint32_t) data[3] << 24U);
+}
+
+static float read_f32_le(const uint8_t data[4]) {
+    const uint32_t bits = read_u32_le(data);
+    float value = 0.0f;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static void format_pressure_torr_compact(float torr_value, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0U) {
+        return;
+    }
+
+    if (torr_value >= 1.0f) {
+        (void) snprintf(out, out_len, "%.0f Torr", (double) torr_value);
+    } else if (torr_value >= 1e-3f) {
+        (void) snprintf(out, out_len, "%.0f mTorr", (double) (torr_value * 1e3f));
+    } else if (torr_value >= 1e-6f) {
+        (void) snprintf(out, out_len, "%.0f uTorr", (double) (torr_value * 1e6f));
+    } else if (torr_value >= 1e-9f) {
+        (void) snprintf(out, out_len, "%.0f nTorr", (double) (torr_value * 1e9f));
+    } else {
+        (void) snprintf(out, out_len, "%.0f pTorr", (double) (torr_value * 1e12f));
+    }
+}
+
+static void format_power_watts_compact(float power_watts, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0U) {
+        return;
+    }
+
+    (void) snprintf(out, out_len, "%.0f W", (double) power_watts);
+}
+
+static bool format_pressure_event_line(const struct can2040_msg *msg,
+                                       uint32_t uptime_ms,
+                                       char *out,
+                                       size_t out_len,
+                                       uint8_t *module_id_out,
+                                       char *pressure_text_out,
+                                       size_t pressure_text_out_len) {
+    if (msg == NULL || out == NULL || out_len == 0U
+        || !is_event_msg_id(msg->id)
+        || msg->dlc < 8U
+        || msg->data[2] != SCP_EVENT_PRESSURE_READING) {
+        return false;
+    }
+
+    char timestamp[16];
+    format_uptime_hh_mm_ss(uptime_ms, timestamp, sizeof(timestamp));
+
+    uint8_t module_id = 0U;
+    const bool has_module_id = decode_module_id_from_msg_id(msg->id, &module_id);
+    if (!has_module_id) {
+        module_id = msg->data[1];
+    }
+    const char *module_code = has_module_id ? module_abbreviation(module_id) : NULL;
+    const char *event_name = event_name_from_code(msg->data[2]);
+
+    char pressure_text[24];
+    if (msg->data[3] != 0U) {
+        format_pressure_torr_compact(read_f32_le(&msg->data[4]), pressure_text, sizeof(pressure_text));
+    } else {
+        (void) snprintf(pressure_text, sizeof(pressure_text), "disconnected");
+    }
+
+    if (module_code != NULL) {
+        (void) snprintf(out,
+                        out_len,
+                        "%s %s %s %s",
+                        timestamp,
+                        module_code,
+                        event_name,
+                        pressure_text);
+    } else {
+        (void) snprintf(out,
+                        out_len,
+                        "%s M%u %s %s",
+                        timestamp,
+                        (unsigned int) module_id,
+                        event_name,
+                        pressure_text);
+    }
+
+    if (module_id_out != NULL) {
+        *module_id_out = module_id;
+    }
+    if (pressure_text_out != NULL && pressure_text_out_len > 0U) {
+        (void) snprintf(pressure_text_out, pressure_text_out_len, "%s", pressure_text);
+    }
+    return true;
+}
+
+static bool format_power_event_line(const struct can2040_msg *msg,
+                                    uint32_t uptime_ms,
+                                    char *out,
+                                    size_t out_len,
+                                    uint8_t *module_id_out,
+                                    char *power_text_out,
+                                    size_t power_text_out_len) {
+    if (msg == NULL || out == NULL || out_len == 0U
+        || !is_event_msg_id(msg->id)
+        || msg->dlc < 8U
+        || msg->data[2] != SCP_EVENT_POWER_READING) {
+        return false;
+    }
+
+    char timestamp[16];
+    format_uptime_hh_mm_ss(uptime_ms, timestamp, sizeof(timestamp));
+
+    uint8_t module_id = 0U;
+    const bool has_module_id = decode_module_id_from_msg_id(msg->id, &module_id);
+    if (!has_module_id) {
+        module_id = msg->data[1];
+    }
+    const char *module_code = has_module_id ? module_abbreviation(module_id) : NULL;
+    const char *event_name = event_name_from_code(msg->data[2]);
+
+    char power_text[24];
+    if (msg->data[3] != 0U) {
+        format_power_watts_compact(read_f32_le(&msg->data[4]), power_text, sizeof(power_text));
+    } else {
+        (void) snprintf(power_text, sizeof(power_text), "disconnected");
+    }
+
+    if (module_code != NULL) {
+        (void) snprintf(out,
+                        out_len,
+                        "%s %s %s %s",
+                        timestamp,
+                        module_code,
+                        event_name,
+                        power_text);
+    } else {
+        (void) snprintf(out,
+                        out_len,
+                        "%s M%u %s %s",
+                        timestamp,
+                        (unsigned int) module_id,
+                        event_name,
+                        power_text);
+    }
+
+    if (module_id_out != NULL) {
+        *module_id_out = module_id;
+    }
+    if (power_text_out != NULL && power_text_out_len > 0U) {
+        (void) snprintf(power_text_out, power_text_out_len, "%s", power_text);
+    }
+    return true;
+}
+
 static void format_uptime_hh_mm_ss(uint32_t uptime_ms, char *out, size_t out_len) {
     if (out == NULL || out_len == 0U) {
         return;
@@ -1381,6 +1600,13 @@ static void format_can_event_line(const struct can2040_msg *msg, uint32_t uptime
 
     if (is_event_msg_id(msg->id) && msg->dlc >= 3U) {
         const char *event_name = event_name_from_code(msg->data[2]);
+        if (format_pressure_event_line(msg, uptime_ms, out, out_len, NULL, NULL, 0U)) {
+            return;
+        }
+        if (format_power_event_line(msg, uptime_ms, out, out_len, NULL, NULL, 0U)) {
+            return;
+        }
+
         if (module_code != NULL) {
             (void) snprintf(out,
                             out_len,
@@ -1709,8 +1935,9 @@ static void build_ui(void) {
     lv_obj_set_style_anim_time(tab_content, 0, 0);
     lv_obj_set_style_bg_color(tab_content, lv_color_hex(MONITOR_UI_SURFACE_COLOR), 0);
 
-    lv_obj_t *tab_connections = lv_tabview_add_tab(s_root_tabs, "Connections");
-    lv_obj_t *tab_events = lv_tabview_add_tab(s_root_tabs, "Event Log");
+    lv_obj_t *tab_connections = lv_tabview_add_tab(s_root_tabs, "Conn");
+    lv_obj_t *tab_events = lv_tabview_add_tab(s_root_tabs, "Log");
+    lv_obj_t *tab_pressure = lv_tabview_add_tab(s_root_tabs, "Pressure");
     lv_obj_t *tab_settings = lv_tabview_add_tab(s_root_tabs, "Settings");
     lv_obj_clear_flag(tab_connections, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(tab_connections, LV_DIR_NONE);
@@ -1719,6 +1946,9 @@ static void build_ui(void) {
     lv_obj_set_scrollbar_mode(tab_events, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_pad_left(tab_events, 0, 0);
     lv_obj_set_style_pad_right(tab_events, 0, 0);
+    lv_obj_clear_flag(tab_pressure, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tab_pressure, LV_DIR_NONE);
+    lv_obj_set_scrollbar_mode(tab_pressure, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(tab_settings, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(tab_settings, LV_DIR_NONE);
     lv_obj_set_scrollbar_mode(tab_settings, LV_SCROLLBAR_MODE_OFF);
@@ -1750,6 +1980,16 @@ static void build_ui(void) {
     lv_obj_set_style_text_color(s_event_log_label, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
     lv_obj_set_style_text_font(s_event_log_label, &lv_font_unscii_8, 0);
     refresh_event_log_label();
+
+    lv_obj_t *pressure_title = lv_label_create(tab_pressure);
+    lv_label_set_text(pressure_title, "Pressure");
+    lv_obj_align(pressure_title, LV_ALIGN_TOP_LEFT, 8, 8);
+    lv_obj_set_style_text_color(pressure_title, lv_color_hex(MONITOR_UI_TITLE_COLOR), 0);
+
+    lv_obj_t *pressure_empty_label = lv_label_create(tab_pressure);
+    lv_label_set_text(pressure_empty_label, "No pressure readings yet.");
+    lv_obj_align(pressure_empty_label, LV_ALIGN_TOP_LEFT, 8, 38);
+    lv_obj_set_style_text_color(pressure_empty_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
 
     s_start_calibration_btn = lv_btn_create(tab_settings);
     lv_obj_set_size(s_start_calibration_btn, 250, 46);
@@ -1949,6 +2189,7 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     memset(&s_transform, 0, sizeof(s_transform));
     memset(&s_connection_rows, 0, sizeof(s_connection_rows));
     memset(&s_event_lines, 0, sizeof(s_event_lines));
+    memset(&s_event_line_meta, 0, sizeof(s_event_line_meta));
     s_event_line_count = 0U;
     s_event_log_dirty = true;
     s_mode = MONITOR_MODE_UI;
@@ -2069,6 +2310,29 @@ void touch_calibrator_display_handle_can_message(const struct can2040_msg *msg, 
     }
 
     char line[MONITOR_EVENT_LINE_CHARS];
+    uint8_t reading_module_id = 0U;
+    char reading_text[24];
+    if (format_pressure_event_line(msg,
+                                   uptime_ms,
+                                   line,
+                                   sizeof(line),
+                                   &reading_module_id,
+                                   reading_text,
+                                   sizeof(reading_text))) {
+        push_collapsible_event_line(line, reading_module_id, SCP_EVENT_PRESSURE_READING, reading_text);
+        return;
+    }
+    if (format_power_event_line(msg,
+                                uptime_ms,
+                                line,
+                                sizeof(line),
+                                &reading_module_id,
+                                reading_text,
+                                sizeof(reading_text))) {
+        push_collapsible_event_line(line, reading_module_id, SCP_EVENT_POWER_READING, reading_text);
+        return;
+    }
+
     format_can_event_line(msg, uptime_ms, line, sizeof(line));
     push_event_line(line);
 }

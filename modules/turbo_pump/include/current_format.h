@@ -1,8 +1,10 @@
 #ifndef CURRENT_FORMAT_H
 #define CURRENT_FORMAT_H
 
+#define TURBO_PUMP_BUS_VOLTAGE 54.0f
+
 typedef enum {
-    CURRENT_DISPLAY_UNIT_AMP = 0,
+    CURRENT_DISPLAY_UNIT_WATT = 0,
     CURRENT_DISPLAY_UNIT_VOLTAGE = 1,
 } current_display_unit_t;
 

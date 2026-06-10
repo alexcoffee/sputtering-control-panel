@@ -15,7 +15,8 @@
 #include "scp/protocol.h"
 
 #define SENSOR_SAMPLE_PERIOD_MS 100
-#define CURRENT_TRANSMIT_PERIOD_MS 1000
+#define POWER_TRANSMIT_PERIOD_MS 1000
+#define POWER_DISCONNECTED_WATTS 0.0f
 #define CURRENT_DISCONNECTED_AMPS 0.0f
 #define SENSOR_CONNECTED_MIN_VOLTAGE 0.0f
 #define SENSOR_CONNECTED_MAX_VOLTAGE 10.5f
@@ -27,7 +28,7 @@ static bool display_unit_from_protocol_value(uint8_t protocol_value, current_dis
 
     switch (protocol_value) {
         case SCP_DISPLAY_UNIT_TORR:
-            *unit_out = CURRENT_DISPLAY_UNIT_AMP;
+            *unit_out = CURRENT_DISPLAY_UNIT_WATT;
             return true;
         case SCP_DISPLAY_UNIT_VOLTAGE:
             *unit_out = CURRENT_DISPLAY_UNIT_VOLTAGE;
@@ -41,9 +42,9 @@ static const char *display_unit_name(current_display_unit_t unit) {
     switch (unit) {
         case CURRENT_DISPLAY_UNIT_VOLTAGE:
             return "voltage";
-        case CURRENT_DISPLAY_UNIT_AMP:
+        case CURRENT_DISPLAY_UNIT_WATT:
         default:
-            return "amps";
+            return "watts";
     }
 }
 
@@ -108,7 +109,7 @@ int main(void) {
 
     absolute_time_t next_heartbeat = nil_time;
     absolute_time_t next_sensor_sample = nil_time;
-    absolute_time_t next_current_transmit = nil_time;
+    absolute_time_t next_power_transmit = nil_time;
     uint8_t heartbeat_counter = 0;
 
     // gpio
@@ -261,13 +262,13 @@ int main(void) {
 
     next_heartbeat = make_timeout_time_ms(SCP_HEARTBEAT_PERIOD);
     next_sensor_sample = make_timeout_time_ms(SENSOR_SAMPLE_PERIOD_MS);
-    next_current_transmit = make_timeout_time_ms(CURRENT_TRANSMIT_PERIOD_MS);
+    next_power_transmit = make_timeout_time_ms(POWER_TRANSMIT_PERIOD_MS);
     uint32_t last_lvgl_tick_ms = to_ms_since_boot(get_absolute_time());
     bool last_connection_ok = false;
     bool has_current_sample = false;
-    bool last_current_connection_ok = false;
-    float last_current_amps = CURRENT_DISCONNECTED_AMPS;
-    current_display_unit_t display_unit = CURRENT_DISPLAY_UNIT_AMP;
+    bool last_power_connection_ok = false;
+    float last_power_watts = POWER_DISCONNECTED_WATTS;
+    current_display_unit_t display_unit = CURRENT_DISPLAY_UNIT_WATT;
 
     turbo_pump_build_switch_event(&tx_msg, last_switch_state, to_ms_since_boot(get_absolute_time()));
     (void) scp_can_transmit(&can_bus, &tx_msg);
@@ -313,17 +314,17 @@ int main(void) {
                 fflush(stdout);
             }
 
-            last_current_amps = display_current_amps;
-            last_current_connection_ok = connection_ok;
+            last_power_watts = connection_ok ? display_current_amps * TURBO_PUMP_BUS_VOLTAGE : POWER_DISCONNECTED_WATTS;
+            last_power_connection_ok = connection_ok;
             has_current_sample = true;
             last_connection_ok = connection_ok;
             next_sensor_sample = make_timeout_time_ms(SENSOR_SAMPLE_PERIOD_MS);
         }
 
-        if (has_current_sample && absolute_time_diff_us(now, next_current_transmit) <= 0) {
-            build_current_reading_event(&tx_msg, g_module_config.module_id, last_current_amps, last_current_connection_ok);
+        if (has_current_sample && absolute_time_diff_us(now, next_power_transmit) <= 0) {
+            build_power_reading_event(&tx_msg, g_module_config.module_id, last_power_watts, last_power_connection_ok);
             (void) scp_can_transmit(&can_bus, &tx_msg);
-            next_current_transmit = make_timeout_time_ms(CURRENT_TRANSMIT_PERIOD_MS);
+            next_power_transmit = make_timeout_time_ms(POWER_TRANSMIT_PERIOD_MS);
         }
 
         // heartbeat

@@ -1,4 +1,4 @@
-# Turbo Pump
+# Varian V70 Turbo Pump
 
 It uses two RJ45 connectors.
 One connects to P1 port and the other to J2 port.
