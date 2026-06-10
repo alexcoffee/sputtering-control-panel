@@ -122,6 +122,17 @@ void pressure_display_render(float torr_value, float voltage, pressure_display_u
     }
 }
 
+void pressure_display_render_error(const char *error_text) {
+    if (s_meter == NULL || s_needle == NULL || s_value_label == NULL || s_unit_label == NULL) {
+        return;
+    }
+
+    lv_meter_set_indicator_value(s_meter, s_needle, 1000);
+    lv_label_set_text(s_value_label, "ERR");
+    lv_label_set_text(s_unit_label, error_text);
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_palette_main(LV_PALETTE_RED), LV_PART_MAIN);
+}
+
 void pressure_display_render_unplugged(void) {
     if (s_meter == NULL || s_needle == NULL || s_value_label == NULL || s_unit_label == NULL) {
         return;

@@ -8,6 +8,8 @@ You must degas the AIGX regularly. Failure to do so will affect the performance 
 gauge.
 Degas the AIGX when the pressure is below 10 uTorr.
 
+The gauge will automatically switch off when the measured pressure rises above 50 mTorr.
+
 
 ![img.png](assets/ion_gauge_wiring.png)
 
@@ -15,17 +17,16 @@ Connection_OK = voltage > 0 < 10
 Or pin4 = HIGH
 
 Activity
-- 2 modes
-
-Gauge on = solid
-Degas on = blinking
+- Gauge on = solid  
+- Degas on = blinking
 
 
 Converting voltage to pressure
 ![img_1.png](assets/ion-gauge-adc.png)
 
 Measurement range: 0.7 V to 8.7 V
-Gauge disabled: 9.0 V
-Emission error: 9.5 V
-Over-pressure trip: 9.7 V
 
+#### Error Voltages
+Gauge disabled: 9.0 V  
+Emission error: 9.5 V  
+Over-pressure trip: 9.7 V  

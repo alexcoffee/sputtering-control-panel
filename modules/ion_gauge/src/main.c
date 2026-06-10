@@ -17,8 +17,66 @@
 #define SENSOR_SAMPLE_PERIOD_MS 100
 #define PRESSURE_TRANSMIT_PERIOD_MS 1000
 #define PRESSURE_DISCONNECTED_TORR 1000.0f
-#define PRESSURE_CONNECTED_MIN_VOLTAGE 2.0f
+#define PRESSURE_CONNECTED_MIN_VOLTAGE 0.0f
 #define PRESSURE_CONNECTED_MAX_VOLTAGE 10.0f
+#define PRESSURE_MEASUREMENT_MIN_VOLTAGE 0.7f
+#define PRESSURE_MEASUREMENT_MAX_VOLTAGE 8.85f
+#define PRESSURE_GAUGE_DISABLED_MAX_VOLTAGE 9.25f
+#define PRESSURE_EMISSION_ERROR_MAX_VOLTAGE 9.6f
+#define PRESSURE_OVER_PRESSURE_TRIP_MAX_VOLTAGE 9.85f
+
+typedef enum {
+    ION_GAUGE_READING_UNPLUGGED = 0,
+    ION_GAUGE_READING_PRESSURE,
+    ION_GAUGE_READING_GAUGE_DISABLED,
+    ION_GAUGE_READING_EMISSION_ERROR,
+    ION_GAUGE_READING_OVER_PRESSURE_TRIP,
+    ION_GAUGE_READING_INVALID
+} ion_gauge_reading_state_t;
+
+static ion_gauge_reading_state_t classify_ion_gauge_voltage(float voltage) {
+    if (voltage <= PRESSURE_CONNECTED_MIN_VOLTAGE || voltage >= PRESSURE_CONNECTED_MAX_VOLTAGE) {
+        return ION_GAUGE_READING_UNPLUGGED;
+    }
+    if (voltage < PRESSURE_MEASUREMENT_MIN_VOLTAGE) {
+        return ION_GAUGE_READING_INVALID;
+    }
+    if (voltage >= PRESSURE_MEASUREMENT_MIN_VOLTAGE && voltage <= PRESSURE_MEASUREMENT_MAX_VOLTAGE) {
+        return ION_GAUGE_READING_PRESSURE;
+    }
+    if (voltage <= PRESSURE_GAUGE_DISABLED_MAX_VOLTAGE) {
+        return ION_GAUGE_READING_GAUGE_DISABLED;
+    }
+    if (voltage <= PRESSURE_EMISSION_ERROR_MAX_VOLTAGE) {
+        return ION_GAUGE_READING_EMISSION_ERROR;
+    }
+    if (voltage <= PRESSURE_OVER_PRESSURE_TRIP_MAX_VOLTAGE) {
+        return ION_GAUGE_READING_OVER_PRESSURE_TRIP;
+    }
+
+    return ION_GAUGE_READING_INVALID;
+}
+
+static bool ion_gauge_state_is_connected(ion_gauge_reading_state_t state) {
+    return state != ION_GAUGE_READING_UNPLUGGED && state != ION_GAUGE_READING_INVALID;
+}
+
+static const char *ion_gauge_error_text(ion_gauge_reading_state_t state) {
+    switch (state) {
+        case ION_GAUGE_READING_GAUGE_DISABLED:
+            return "disabled";
+        case ION_GAUGE_READING_EMISSION_ERROR:
+            return "emission";
+        case ION_GAUGE_READING_OVER_PRESSURE_TRIP:
+            return "overtrip";
+        case ION_GAUGE_READING_INVALID:
+            return "invalid";
+        case ION_GAUGE_READING_UNPLUGGED:
+        case ION_GAUGE_READING_PRESSURE:
+        default:
+            return "";
+    }
+}
 
 static bool pressure_unit_from_protocol_value(uint8_t protocol_value, pressure_display_unit_t *unit_out) {
     if (unit_out == NULL) {
@@ -231,13 +289,16 @@ int main(void) {
 
         if (absolute_time_diff_us(now, next_sensor_sample) <= 0) {
             const pressure_sensor_reading_t pressure_reading = pressure_sensor_read_torr();
-            const bool connection_ok = pressure_reading.voltage >= PRESSURE_CONNECTED_MIN_VOLTAGE
-                                       && pressure_reading.voltage <= PRESSURE_CONNECTED_MAX_VOLTAGE;
-            const float display_torr = connection_ok ? pressure_reading.pressure_torr : PRESSURE_DISCONNECTED_TORR;
+            const ion_gauge_reading_state_t reading_state = classify_ion_gauge_voltage(pressure_reading.voltage);
+            const bool connection_ok = ion_gauge_state_is_connected(reading_state);
+            const bool pressure_valid = reading_state == ION_GAUGE_READING_PRESSURE;
+            const float display_torr = pressure_valid ? pressure_reading.pressure_torr : PRESSURE_DISCONNECTED_TORR;
             gpio_put(connection_ok_gpio, connection_ok);
 
-            if (connection_ok) {
+            if (pressure_valid) {
                 pressure_display_render(display_torr, pressure_reading.voltage, display_unit);
+            } else if (connection_ok) {
+                pressure_display_render_error(ion_gauge_error_text(reading_state));
             } else {
                 pressure_display_render_unplugged();
             }
@@ -255,7 +316,7 @@ int main(void) {
             }
 
             last_pressure_torr = display_torr;
-            last_pressure_connection_ok = connection_ok;
+            last_pressure_connection_ok = pressure_valid;
             has_pressure_sample = true;
             last_connection_ok = connection_ok;
             next_sensor_sample = make_timeout_time_ms(SENSOR_SAMPLE_PERIOD_MS);
