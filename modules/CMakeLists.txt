@@ -90,6 +90,7 @@ endfunction()
 
 set(SCP_ALL_MODULES
     pirani
+    pirani_sim
     ion_gauge
     turbo_pump
     roughing_pump
