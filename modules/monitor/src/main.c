@@ -237,14 +237,14 @@ int main(void) {
             }
         }
 
-        if (!flash_active) {
-            const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
-            if (elapsed_lvgl_ms != 0U) {
-                touch_calibrator_display_tick(elapsed_lvgl_ms);
-                last_lvgl_tick_ms = now_ms;
-            }
-            touch_calibrator_display_task_handler();
+        const uint32_t elapsed_lvgl_ms = now_ms - last_lvgl_tick_ms;
+        if (elapsed_lvgl_ms != 0U) {
+            touch_calibrator_display_tick(elapsed_lvgl_ms);
+            last_lvgl_tick_ms = now_ms;
+        }
+        touch_calibrator_display_task_handler();
 
+        if (!flash_active) {
             if (absolute_time_diff_us(now, next_can_metrics_update) <= 0) {
                 struct can2040_stats can_stats;
                 can2040_get_statistics(&can_bus.can, &can_stats);

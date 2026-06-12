@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +10,7 @@
 #include "hardware/sync.h"
 #include "lvgl/lvgl.h"
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include "scp/can_bus.h"
 #include "scp/module_ids.h"
 #include "scp/module_runtime.h"
@@ -58,11 +60,14 @@ extern const uint16_t monitor_jar_splash_rgb565[];
 #define MONITOR_SETTINGS_FOCUSABLE_COUNT 5U
 #define MONITOR_ENCODER_SLIDER_STEP 1
 #define MONITOR_ENCODER_BUTTON_FALLBACK_PIN 17U
+#define MONITOR_PRESSURE_HISTORY_POINTS 120U
+#define MONITOR_PRESSURE_CHART_MAX_LOG100 600U
 
 #define MONITOR_HEARTBEAT_WINDOW 0x80U
 #define MONITOR_HEARTBEAT_TIMEOUT_MS (SCP_HEARTBEAT_PERIOD * 3U)
 #define MONITOR_ENCODER_DEBOUNCE_MS 8U
 #define MONITOR_ENCODER_TRANSITIONS_PER_STEP 2
+#define MONITOR_ENCODER_TAB_SETTLE_MS 25U
 
 #define TOUCH_DEFAULT_RAW_MIN 200U
 #define TOUCH_DEFAULT_RAW_MAX 3800U
@@ -156,6 +161,8 @@ static lv_obj_t *s_root_tabs;
 static lv_obj_t *s_connections_list;
 static lv_obj_t *s_connections_empty_label;
 static lv_obj_t *s_event_log_label;
+static lv_obj_t *s_pressure_value_label;
+static lv_obj_t *s_pressure_chart;
 static lv_obj_t *s_settings_status_label;
 static lv_obj_t *s_brightness_value_label;
 static lv_obj_t *s_unit_status_label;
@@ -188,7 +195,16 @@ static uint32_t s_capture_sum_y;
 static uint16_t s_capture_samples;
 static lv_point_t s_last_touch_point;
 
+static bool s_pirani_pressure_sample_valid;
+static bool s_pirani_pressure_connection_ok;
+static float s_pirani_pressure_torr;
+static bool s_pirani_pressure_pending_valid;
+static bool s_pirani_pressure_pending_connection_ok;
+static float s_pirani_pressure_pending_torr;
+static lv_chart_series_t *s_pirani_pressure_series;
+
 static bool s_encoder_available;
+static repeating_timer_t s_encoder_poll_timer;
 static uint8_t s_encoder_a_pin;
 static uint8_t s_encoder_b_pin;
 static uint8_t s_encoder_button_pin;
@@ -196,11 +212,12 @@ static bool s_encoder_button_fallback_available;
 static uint8_t s_encoder_button_fallback_pin;
 static uint8_t s_encoder_prev_ab_state;
 static int8_t s_encoder_transition_accumulator;
-static int16_t s_encoder_step_delta;
+static volatile int16_t s_encoder_step_delta;
 static bool s_encoder_button_raw_pressed;
 static bool s_encoder_button_debounced_pressed;
-static uint32_t s_encoder_button_last_edge_ms;
-static bool s_encoder_button_click_pending;
+static volatile uint32_t s_encoder_button_last_edge_ms;
+static volatile bool s_encoder_button_click_pending;
+static volatile uint32_t s_encoder_last_step_ms;
 static bool s_encoder_button_active_low;
 static bool s_encoder_tab_entered;
 static bool s_encoder_slider_adjust_mode;
@@ -211,6 +228,7 @@ static bool s_pressure_unit_command_pending;
 static const monitor_module_name_t s_module_names[] = {
     {SCP_MODULE_ID_ION_GAUGE, "Ion Gauge"},
     {SCP_MODULE_ID_PIRANI, "Pirani Gauge"},
+    {SCP_MODULE_ID_PIRANI_SIM, "Pirani Sim"},
     {SCP_MODULE_ID_ROUGHING_PUMP, "Roughing Pump"},
     {SCP_MODULE_ID_TURBO_PUMP, "Turbo Pump"},
     {SCP_MODULE_ID_MONITOR, "Monitor"},
@@ -240,6 +258,7 @@ static bool save_calibration_to_flash(void);
 static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins, uint32_t now_ms);
 
 static void monitor_encoder_sample(uint32_t now_ms);
+static bool monitor_encoder_poll_timer_cb(repeating_timer_t *rt);
 
 static void monitor_encoder_apply_tab_navigation(void);
 static uint8_t monitor_encoder_get_active_tab_index(void);
@@ -259,6 +278,10 @@ static void wait_for_splash_dismiss(uint32_t max_wait_ms);
 static void update_pressure_unit_controls(void);
 static void request_pressure_unit_change(uint8_t unit);
 static void on_pressure_unit_button_clicked(lv_event_t *event);
+static void on_pressure_chart_draw_part(lv_event_t *event);
+static void apply_pending_pirani_pressure_view(void);
+static void update_pirani_pressure_view(void);
+static lv_coord_t pressure_torr_to_chart_value(float torr_value);
 
 static const char *friendly_module_name(uint8_t module_id);
 static bool is_connection_row_online(const monitor_connection_row_t *entry, uint32_t now_ms);
@@ -874,23 +897,17 @@ static void monitor_encoder_exit_tab_content_mode(void) {
     monitor_settings_clear_focus();
 }
 
-static void monitor_encoder_set_tab_relative(int8_t direction) {
-    if (s_root_tabs == NULL || direction == 0) {
+static void monitor_encoder_set_tab_index(uint8_t target) {
+    if (s_root_tabs == NULL) {
         return;
     }
 
-    const int32_t current = (int32_t) lv_tabview_get_tab_act(s_root_tabs);
-    int32_t target = current + (direction > 0 ? 1 : -1);
-    if (target < 0) {
-        target = 0;
-    }
-    if (target >= (int32_t) MONITOR_TAB_COUNT) {
-        target = (int32_t) (MONITOR_TAB_COUNT - 1U);
+    const uint32_t current = lv_tabview_get_tab_act(s_root_tabs);
+    if (target >= MONITOR_TAB_COUNT || target == current) {
+        return;
     }
 
-    if (target != current) {
-        lv_tabview_set_act(s_root_tabs, (uint32_t) target, LV_ANIM_OFF);
-    }
+    lv_tabview_set_act(s_root_tabs, target, LV_ANIM_OFF);
 }
 
 static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins, uint32_t now_ms) {
@@ -947,6 +964,7 @@ static void monitor_encoder_init(const touch_calibrator_display_spi_pins_t *pins
     s_encoder_tab_entered = false;
     s_encoder_slider_adjust_mode = false;
     s_settings_focus_index = 0U;
+    (void)add_repeating_timer_ms(-1, monitor_encoder_poll_timer_cb, NULL, &s_encoder_poll_timer);
     s_encoder_available = true;
 }
 
@@ -1014,6 +1032,12 @@ static void monitor_encoder_sample(uint32_t now_ms) {
     }
 }
 
+static bool monitor_encoder_poll_timer_cb(repeating_timer_t *rt) {
+    (void) rt;
+    monitor_encoder_sample(to_ms_since_boot(get_absolute_time()));
+    return true;
+}
+
 static void monitor_encoder_apply_tab_navigation(void) {
     if (s_mode != MONITOR_MODE_UI || s_root_tabs == NULL) {
         s_encoder_step_delta = 0;
@@ -1022,14 +1046,40 @@ static void monitor_encoder_apply_tab_navigation(void) {
         return;
     }
 
-    if (!s_encoder_tab_entered) {
-        while (s_encoder_step_delta > 0) {
-            monitor_encoder_set_tab_relative(1);
-            s_encoder_step_delta--;
+    if (!monitor_encoder_settings_tab_active()) {
+        s_encoder_tab_entered = false;
+        s_encoder_slider_adjust_mode = false;
+        monitor_settings_clear_focus();
+
+        if (s_encoder_step_delta != 0) {
+            const int32_t current = (int32_t) lv_tabview_get_tab_act(s_root_tabs);
+            int32_t target = current + (int32_t) s_encoder_step_delta;
+            if (target < 0) {
+                target = 0;
+            } else if (target >= (int32_t) MONITOR_TAB_COUNT) {
+                target = (int32_t) (MONITOR_TAB_COUNT - 1U);
+            }
+
+            monitor_encoder_set_tab_index((uint8_t) target);
+            s_encoder_step_delta = 0;
         }
-        while (s_encoder_step_delta < 0) {
-            monitor_encoder_set_tab_relative(-1);
-            s_encoder_step_delta++;
+
+        s_encoder_button_click_pending = false;
+        return;
+    }
+
+    if (!s_encoder_tab_entered) {
+        if (s_encoder_step_delta != 0) {
+            const int32_t current = (int32_t) lv_tabview_get_tab_act(s_root_tabs);
+            int32_t target = current + (int32_t) s_encoder_step_delta;
+            if (target < 0) {
+                target = 0;
+            } else if (target >= (int32_t) MONITOR_TAB_COUNT) {
+                target = (int32_t) (MONITOR_TAB_COUNT - 1U);
+            }
+
+            monitor_encoder_set_tab_index((uint8_t) target);
+            s_encoder_step_delta = 0;
         }
 
         if (s_encoder_button_click_pending) {
@@ -1038,29 +1088,6 @@ static void monitor_encoder_apply_tab_navigation(void) {
             if (monitor_encoder_settings_tab_active()) {
                 monitor_settings_set_focus_index(s_settings_focus_index);
             }
-            s_encoder_button_click_pending = false;
-        }
-        return;
-    }
-
-    if (!monitor_encoder_settings_tab_active()) {
-        s_encoder_slider_adjust_mode = false;
-        monitor_settings_clear_focus();
-
-        if (s_encoder_step_delta != 0) {
-            s_encoder_tab_entered = false;
-            while (s_encoder_step_delta > 0) {
-                monitor_encoder_set_tab_relative(1);
-                s_encoder_step_delta--;
-            }
-            while (s_encoder_step_delta < 0) {
-                monitor_encoder_set_tab_relative(-1);
-                s_encoder_step_delta++;
-            }
-        }
-
-        if (s_encoder_button_click_pending) {
-            s_encoder_tab_entered = false;
             s_encoder_button_click_pending = false;
         }
         return;
@@ -1439,6 +1466,140 @@ static void format_power_watts_compact(float power_watts, char *out, size_t out_
     }
 
     (void) snprintf(out, out_len, "%.0f W", (double) power_watts);
+}
+
+static lv_coord_t pressure_torr_to_chart_value(float torr_value) {
+    float mtorr = torr_value * 1e3f;
+    if (mtorr <= 1.0f) {
+        return 0;
+    }
+
+    float log_value = log10f(mtorr) * 100.0f;
+    if (log_value < 0.0f) {
+        log_value = 0.0f;
+    }
+    if (log_value > (float)MONITOR_PRESSURE_CHART_MAX_LOG100) {
+        log_value = (float)MONITOR_PRESSURE_CHART_MAX_LOG100;
+    }
+    return (lv_coord_t)log_value;
+}
+
+static void format_pressure_mtorr(char *out, size_t out_len, float torr_value) {
+    if (out == NULL || out_len == 0U) {
+        return;
+    }
+
+    const float mtorr_value = torr_value * 1e3f;
+    if (mtorr_value >= 1000.0f) {
+        (void)snprintf(out, out_len, "%.0f Torr", (double)(mtorr_value / 1000.0f));
+    } else {
+        (void)snprintf(out, out_len, "%.0f mTorr", (double)mtorr_value);
+    }
+}
+
+static void on_pressure_chart_draw_part(lv_event_t *event) {
+    lv_obj_draw_part_dsc_t *part = lv_event_get_draw_part_dsc(event);
+    if (part == NULL || part->type != LV_CHART_DRAW_PART_TICK_LABEL || part->part != LV_PART_TICKS) {
+        return;
+    }
+
+    if (part->id != LV_CHART_AXIS_PRIMARY_Y || part->text == NULL || part->text_length == 0U) {
+        return;
+    }
+
+    switch (part->value) {
+        case 0:
+            (void)snprintf(part->text, part->text_length, "1");
+            break;
+        case 100:
+            (void)snprintf(part->text, part->text_length, "10");
+            break;
+        case 200:
+            (void)snprintf(part->text, part->text_length, "100");
+            break;
+        case 300:
+            (void)snprintf(part->text, part->text_length, "1k");
+            break;
+        case 400:
+            (void)snprintf(part->text, part->text_length, "10k");
+            break;
+        case 500:
+            (void)snprintf(part->text, part->text_length, "100k");
+            break;
+        case 600:
+            (void)snprintf(part->text, part->text_length, "760k");
+            break;
+        default:
+            break;
+    }
+}
+
+static bool try_read_pirani_pressure_reading(const struct can2040_msg *msg,
+                                             bool *connection_ok_out,
+                                             float *pressure_torr_out) {
+    if (msg == NULL || connection_ok_out == NULL || pressure_torr_out == NULL) {
+        return false;
+    }
+    if (!is_event_msg_id(msg->id) || msg->dlc < 8U || msg->data[2] != SCP_EVENT_PRESSURE_READING) {
+        return false;
+    }
+
+    uint8_t module_id = 0U;
+    if (!decode_module_id_from_msg_id(msg->id, &module_id)) {
+        module_id = msg->data[1];
+    }
+    if (module_id != SCP_MODULE_ID_PIRANI && module_id != SCP_MODULE_ID_PIRANI_SIM) {
+        return false;
+    }
+
+    *connection_ok_out = msg->data[3] != 0U;
+    if (*connection_ok_out) {
+        *pressure_torr_out = read_f32_le(&msg->data[4]);
+    } else {
+        *pressure_torr_out = 0.0f;
+    }
+    return true;
+}
+
+static void update_pirani_pressure_view(void) {
+    if (s_pressure_value_label == NULL) {
+        return;
+    }
+
+    if (!s_pirani_pressure_sample_valid) {
+        lv_label_set_text(s_pressure_value_label, "--");
+        return;
+    }
+
+    if (!s_pirani_pressure_connection_ok) {
+        lv_label_set_text(s_pressure_value_label, "Disconnected");
+        if (s_pressure_chart != NULL && s_pirani_pressure_series != NULL) {
+            lv_chart_set_next_value(s_pressure_chart, s_pirani_pressure_series, 0);
+        }
+        return;
+    }
+
+    char pressure_text[24];
+    format_pressure_mtorr(pressure_text, sizeof(pressure_text), s_pirani_pressure_torr);
+    lv_label_set_text(s_pressure_value_label, pressure_text);
+
+    if (s_pressure_chart != NULL && s_pirani_pressure_series != NULL) {
+        lv_chart_set_next_value(s_pressure_chart,
+                                s_pirani_pressure_series,
+                                pressure_torr_to_chart_value(s_pirani_pressure_torr));
+    }
+}
+
+static void apply_pending_pirani_pressure_view(void) {
+    if (!s_pirani_pressure_pending_valid) {
+        return;
+    }
+
+    s_pirani_pressure_sample_valid = true;
+    s_pirani_pressure_connection_ok = s_pirani_pressure_pending_connection_ok;
+    s_pirani_pressure_torr = s_pirani_pressure_pending_torr;
+    s_pirani_pressure_pending_valid = false;
+    update_pirani_pressure_view();
 }
 
 static bool format_pressure_event_line(const struct can2040_msg *msg,
@@ -1981,15 +2142,34 @@ static void build_ui(void) {
     lv_obj_set_style_text_font(s_event_log_label, &lv_font_unscii_8, 0);
     refresh_event_log_label();
 
-    lv_obj_t *pressure_title = lv_label_create(tab_pressure);
-    lv_label_set_text(pressure_title, "Pressure");
-    lv_obj_align(pressure_title, LV_ALIGN_TOP_LEFT, 8, 8);
-    lv_obj_set_style_text_color(pressure_title, lv_color_hex(MONITOR_UI_TITLE_COLOR), 0);
+    s_pressure_value_label = lv_label_create(tab_pressure);
+    lv_obj_set_width(s_pressure_value_label, lv_pct(100));
+    lv_obj_align(s_pressure_value_label, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_text_font(s_pressure_value_label, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_align(s_pressure_value_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_pressure_value_label, lv_color_hex(MONITOR_UI_TEXT_COLOR), 0);
 
-    lv_obj_t *pressure_empty_label = lv_label_create(tab_pressure);
-    lv_label_set_text(pressure_empty_label, "No pressure readings yet.");
-    lv_obj_align(pressure_empty_label, LV_ALIGN_TOP_LEFT, 8, 38);
-    lv_obj_set_style_text_color(pressure_empty_label, lv_color_hex(MONITOR_UI_TEXT_MUTED_COLOR), 0);
+    s_pressure_chart = lv_chart_create(tab_pressure);
+    lv_obj_set_size(s_pressure_chart, 247, 382);
+    lv_obj_align(s_pressure_chart, LV_ALIGN_TOP_LEFT, 40, 44);
+    lv_obj_set_style_bg_color(s_pressure_chart, lv_color_hex(MONITOR_UI_SURFACE_COLOR), 0);
+    lv_obj_set_style_border_color(s_pressure_chart, lv_color_hex(MONITOR_UI_BORDER_COLOR), 0);
+    lv_obj_set_style_border_width(s_pressure_chart, 1, 0);
+    lv_obj_set_style_radius(s_pressure_chart, 0, 0);
+    lv_obj_set_style_line_color(s_pressure_chart, lv_color_hex(MONITOR_UI_TITLE_COLOR), 0);
+    lv_chart_set_type(s_pressure_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_update_mode(s_pressure_chart, LV_CHART_UPDATE_MODE_SHIFT);
+    lv_chart_set_point_count(s_pressure_chart, MONITOR_PRESSURE_HISTORY_POINTS);
+    lv_chart_set_range(s_pressure_chart, LV_CHART_AXIS_PRIMARY_Y, 0, MONITOR_PRESSURE_CHART_MAX_LOG100);
+    lv_chart_set_div_line_count(s_pressure_chart, 4U, 6U);
+    lv_chart_set_axis_tick(s_pressure_chart, LV_CHART_AXIS_PRIMARY_Y, 6, 4, 7, 1, true, 40);
+    lv_obj_set_style_pad_all(s_pressure_chart, 6, 0);
+    lv_obj_set_style_pad_gap(s_pressure_chart, 1, 0);
+    s_pirani_pressure_series = lv_chart_add_series(s_pressure_chart, lv_color_hex(MONITOR_UI_TITLE_COLOR), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(s_pressure_chart, s_pirani_pressure_series, 0);
+    lv_obj_add_event_cb(s_pressure_chart, on_pressure_chart_draw_part, LV_EVENT_DRAW_PART_BEGIN, NULL);
+
+    update_pirani_pressure_view();
 
     s_start_calibration_btn = lv_btn_create(tab_settings);
     lv_obj_set_size(s_start_calibration_btn, 250, 46);
@@ -2194,6 +2374,12 @@ void touch_calibrator_display_init(const touch_calibrator_display_spi_pins_t *pi
     s_event_log_dirty = true;
     s_mode = MONITOR_MODE_UI;
     s_last_touch_point = (lv_point_t){0, 0};
+    s_pirani_pressure_sample_valid = false;
+    s_pirani_pressure_connection_ok = false;
+    s_pirani_pressure_torr = 0.0f;
+    s_pirani_pressure_pending_valid = false;
+    s_pirani_pressure_pending_connection_ok = false;
+    s_pirani_pressure_pending_torr = 0.0f;
     s_encoder_available = false;
     s_encoder_step_delta = 0;
     s_encoder_button_click_pending = false;
@@ -2276,8 +2462,8 @@ void touch_calibrator_display_tick(uint32_t elapsed_ms) {
 
 void touch_calibrator_display_task_handler(void) {
     const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-    monitor_encoder_sample(now_ms);
     monitor_encoder_apply_tab_navigation();
+    apply_pending_pirani_pressure_view();
 
     if (s_mode == MONITOR_MODE_CALIBRATION) {
         update_calibration();
@@ -2312,6 +2498,13 @@ void touch_calibrator_display_handle_can_message(const struct can2040_msg *msg, 
     char line[MONITOR_EVENT_LINE_CHARS];
     uint8_t reading_module_id = 0U;
     char reading_text[24];
+    bool pressure_connection_ok = false;
+    float pressure_torr = 0.0f;
+    if (try_read_pirani_pressure_reading(msg, &pressure_connection_ok, &pressure_torr)) {
+        s_pirani_pressure_pending_valid = true;
+        s_pirani_pressure_pending_connection_ok = pressure_connection_ok;
+        s_pirani_pressure_pending_torr = pressure_torr;
+    }
     if (format_pressure_event_line(msg,
                                    uptime_ms,
                                    line,
