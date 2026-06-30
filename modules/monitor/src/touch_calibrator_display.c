@@ -233,6 +233,7 @@ static const monitor_module_name_t s_module_names[] = {
     {SCP_MODULE_ID_TURBO_PUMP, "Turbo Pump"},
     {SCP_MODULE_ID_MONITOR, "Monitor"},
     {SCP_MODULE_ID_USB_CAN_BRIDGE, "USB-CAN Bridge"},
+    {SCP_MODULE_ID_SPI_CAN_BRIDGE, "SPI-CAN Bridge"},
 };
 
 static inline void ili9488_write(uint8_t mode, uint8_t value) {
@@ -1423,6 +1424,8 @@ static const char *module_abbreviation(uint8_t module_id) {
         return "TP";
     case SCP_MODULE_ID_USB_CAN_BRIDGE:
         return "CB";
+    case SCP_MODULE_ID_SPI_CAN_BRIDGE:
+        return "SB";
     default:
         return NULL;
     }

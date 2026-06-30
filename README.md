@@ -78,10 +78,10 @@ This is required so dependencies like `pico-sdk/lib/tinyusb` are available to CM
 
 ## Build
 
-Use `tools/build.sh` to build one module (default: `roughing_pump`):
+Use `tools/build.sh` to build one module:
 
 ```bash
-./tools/build.sh pirani
+./tools/build.sh roughing_pump
 ```
 
 Or use CMake directly:
@@ -110,6 +110,17 @@ To flash a specific Pico when multiple are connected, use `--serial`:
 ```bash
 picotool load --serial RPI-RP2/1234567890 cmake-build-debug-eabi/modules/scp_pirani.uf2
 ```
+
+The project flash helper wraps `picotool load -x -F`. Run it from the `tools/` directory because its UF2 path is
+relative to that directory:
+
+```bash
+./tools/build.sh roughing_pump
+cd tools
+./flash.sh roughing_pump
+```
+
+If `picotool` reports that it cannot initialize libUSB, run the flash command with USB/device permissions.
 
 ## GPIO Pin Audit
 
@@ -154,3 +165,27 @@ Notes:
 - The bridge forwards fixed-size binary USB packets to CAN for low overhead.
 - Flash transport uses CAN message IDs `0x300 + module_id` (control), `0x340 + module_id` (data), and
   `0x380 + module_id` (status).
+
+## Manage CAN Through SPI
+
+Build and flash the `spi_can_bridge` firmware onto the Pico that sits between the Pi Zero and the CAN bus:
+
+```bash
+./tools/build.sh spi_can_bridge
+./tools/auto_flash.sh spi_can_bridge
+```
+
+Then run the manager against the SPI device exposed by the Pi Zero:
+
+```bash
+python3 -m manager.scp_manager.app --spi-device /dev/spidev0.0
+```
+
+On the Pi Zero, install the Python SPI binding first:
+
+```bash
+sudo apt install python3-spidev
+```
+
+The bridge uses the same fixed-size CAN packet format as the USB bridge, but the transport between the Pi Zero
+and the bridge Pico is SPI instead of USB.

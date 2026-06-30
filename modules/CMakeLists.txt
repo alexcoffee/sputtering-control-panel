@@ -46,6 +46,12 @@ function(scp_add_module module_dir target_name)
 
     endif()
 
+    if(target_name STREQUAL "scp_spi_can_bridge")
+        target_link_libraries(${target_name}
+            hardware_spi
+        )
+    endif()
+
     pico_enable_stdio_uart(${target_name} 0)
     pico_enable_stdio_usb(${target_name} 1)
     pico_add_extra_outputs(${target_name})
@@ -86,6 +92,12 @@ function(scp_add_module_ide_target module_name)
             hardware_flash
         )
     endif()
+
+    if(module_name STREQUAL "spi_can_bridge")
+        target_link_libraries(scp_${module_name}_ide PRIVATE
+            hardware_spi
+        )
+    endif()
 endfunction()
 
 set(SCP_ALL_MODULES
@@ -96,6 +108,7 @@ set(SCP_ALL_MODULES
     roughing_pump
     monitor
     usb_can_bridge
+    spi_can_bridge
 )
 
 if(NOT DEFINED SCP_BUILD_ALL_MODULES)

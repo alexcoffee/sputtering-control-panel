@@ -25,7 +25,8 @@ enum {
 };
 
 enum {
-    SCP_COMMAND_SET_DISPLAY_UNIT = 1
+    SCP_COMMAND_SET_DISPLAY_UNIT = 1,
+    SCP_COMMAND_SET_SWITCH = 2
 };
 
 enum {

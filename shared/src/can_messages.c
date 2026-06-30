@@ -99,6 +99,22 @@ void build_set_display_unit_command(struct can2040_msg *msg,
     msg->data[7] = 0U;
 }
 
+void build_set_switch_command(struct can2040_msg *msg,
+                              uint8_t source_module_id,
+                              uint8_t target_module_id,
+                              bool enabled) {
+    msg->id = scp_protocol_command_msg_id(target_module_id);
+    msg->dlc = 8;
+    msg->data[0] = SCP_PROTOCOL_VERSION;
+    msg->data[1] = source_module_id;
+    msg->data[2] = SCP_COMMAND_SET_SWITCH;
+    msg->data[3] = enabled ? 1U : 0U;
+    msg->data[4] = 0U;
+    msg->data[5] = 0U;
+    msg->data[6] = 0U;
+    msg->data[7] = 0U;
+}
+
 void build_flash_control_command(struct can2040_msg *msg,
                                  uint8_t source_module_id,
                                  uint8_t target_module_id,

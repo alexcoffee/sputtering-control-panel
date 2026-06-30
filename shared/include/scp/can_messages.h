@@ -17,6 +17,10 @@ void build_set_display_unit_command(struct can2040_msg *msg,
                                     uint8_t source_module_id,
                                     uint8_t target_module_id,
                                     uint8_t display_unit);
+void build_set_switch_command(struct can2040_msg *msg,
+                              uint8_t source_module_id,
+                              uint8_t target_module_id,
+                              bool enabled);
 void build_flash_control_command(struct can2040_msg *msg,
                                  uint8_t source_module_id,
                                  uint8_t target_module_id,

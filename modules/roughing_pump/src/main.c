@@ -10,6 +10,34 @@
 #include "scp/can_bus.h"
 #include "scp/flash_can.h"
 #include "scp/module_ids.h"
+#include "scp/protocol.h"
+
+static bool try_parse_set_switch_command(const struct can2040_msg *msg, bool *enabled_out) {
+    if (msg == NULL || enabled_out == NULL) {
+        return false;
+    }
+    if (msg->id != scp_protocol_command_msg_id(SCP_MODULE_ID_ROUGHING_PUMP)) {
+        return false;
+    }
+    if (msg->dlc < 4U || msg->data[0] != SCP_PROTOCOL_VERSION || msg->data[2] != SCP_COMMAND_SET_SWITCH) {
+        return false;
+    }
+
+    *enabled_out = msg->data[3] != 0U;
+    return true;
+}
+
+static void apply_pump_state(scp_can_bus_t *can_bus,
+                             struct can2040_msg *tx_msg,
+                             uint8_t ssr_gpio,
+                             uint8_t connection_activity_gpio,
+                             bool enabled,
+                             uint32_t uptime_ms) {
+    gpio_put(ssr_gpio, enabled);
+    gpio_put(connection_activity_gpio, enabled);
+    roughing_pump_build_switch_event(tx_msg, enabled, uptime_ms);
+    (void) scp_can_transmit(can_bus, tx_msg);
+}
 
 static const scp_gpio_assignment_t g_gpio_assignments[] = {
     {SIGNAL_HEARTBEAT_LED, 25},
@@ -108,16 +136,17 @@ int main(void) {
     }
     scp_flash_can_target_init(&flash_target, g_module_config.module_id);
 
-    bool last_switch_state = !gpio_get(switch_gpio);
+    bool last_physical_switch_state = !gpio_get(switch_gpio);
+    bool pump_enabled = last_physical_switch_state;
     bool connection_ok = !gpio_get(connection_detect_gpio);
     bool last_connection_ok = connection_ok;
-    bool switch_candidate_state = last_switch_state;
+    bool switch_candidate_state = last_physical_switch_state;
     absolute_time_t switch_candidate_since = get_absolute_time();
     gpio_put(connection_ok_gpio, connection_ok);
-    gpio_put(ssr_gpio, last_switch_state);
-    gpio_put(connection_activity_gpio, last_switch_state);
+    gpio_put(ssr_gpio, pump_enabled);
+    gpio_put(connection_activity_gpio, pump_enabled);
 
-    roughing_pump_build_switch_event(&tx_msg, last_switch_state, to_ms_since_boot(get_absolute_time()));
+    roughing_pump_build_switch_event(&tx_msg, pump_enabled, to_ms_since_boot(get_absolute_time()));
     (void) scp_can_transmit(&can_bus, &tx_msg);
 
     // give time to connect to serial port
@@ -161,16 +190,13 @@ int main(void) {
         if (switch_state != switch_candidate_state) {
             switch_candidate_state = switch_state;
             switch_candidate_since = now;
-        } else if (switch_candidate_state != last_switch_state
+        } else if (switch_candidate_state != last_physical_switch_state
                    && absolute_time_diff_us(switch_candidate_since, now) >= SWITCH_DEBOUNCE_US) {
-            last_switch_state = switch_candidate_state;
-            gpio_put(ssr_gpio, last_switch_state);
-            gpio_put(connection_activity_gpio, last_switch_state);
+            last_physical_switch_state = switch_candidate_state;
+            pump_enabled = last_physical_switch_state;
+            apply_pump_state(&can_bus, &tx_msg, ssr_gpio, connection_activity_gpio, pump_enabled, uptime_ms);
 
-            roughing_pump_build_switch_event(&tx_msg, last_switch_state, uptime_ms);
-            (void) scp_can_transmit(&can_bus, &tx_msg);
-
-            printf("switch=%u -> ssr=%u\n", last_switch_state ? 1U : 0U, last_switch_state ? 1U : 0U);
+            printf("switch=%u -> ssr=%u\n", pump_enabled ? 1U : 0U, pump_enabled ? 1U : 0U);
         }
 
         if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
@@ -187,6 +213,14 @@ int main(void) {
 
         while (scp_can_try_read(&can_bus, &rx_msg)) {
             if (scp_flash_can_target_handle_can_frame(&flash_target, &can_bus, &rx_msg)) {
+                continue;
+            }
+            bool requested_enabled = pump_enabled;
+            if (try_parse_set_switch_command(&rx_msg, &requested_enabled) && requested_enabled != pump_enabled) {
+                pump_enabled = requested_enabled;
+                apply_pump_state(&can_bus, &tx_msg, ssr_gpio, connection_activity_gpio, pump_enabled, uptime_ms);
+                printf("\nremote switch=%u -> ssr=%u\n", pump_enabled ? 1U : 0U, pump_enabled ? 1U : 0U);
+                fflush(stdout);
                 continue;
             }
             printf("RX id=0x%lx dlc=%lx\n", (unsigned long) rx_msg.id, rx_msg.dlc);

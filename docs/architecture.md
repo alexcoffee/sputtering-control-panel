@@ -30,3 +30,9 @@ cmake --build build/all
 ## RJ45 Connector
 - Using standard LAN cable to connect modules to instruments/pumps.
 - Each module has a RJ45 connector that has two leds: green for connection status and yellow for activity.
+
+## Manager node
+- A Raspberry Pi Zero 2 W will act as a networked manager for the CAN bus.
+- It will provide a web UI, a WebSocket live stream, and command dispatch to modules.
+- It will not replace the local safety behavior of Pico modules.
+- The manager should be implemented as a Linux service using SocketCAN or a dedicated SPI bridge Pico.

@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SCP Manager</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --panel: #171b22;
+      --panel2: #11151b;
+      --text: #e7edf7;
+      --muted: #9aa6b2;
+      --accent: #5aa9ff;
+      --good: #3cd18d;
+      --warn: #f5b95d;
+      --bad: #ff6b72;
+      --border: #2a3140;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(10, 12, 16, 0.9);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+    }
+    #status {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      min-height: calc(100vh - 58px);
+    }
+    aside, section {
+      min-width: 0;
+    }
+    aside {
+      border-right: 1px solid var(--border);
+      background: var(--panel2);
+      padding: 16px;
+      overflow: auto;
+    }
+    section {
+      padding: 16px;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 12px;
+      min-width: 0;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .module-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: #10151c;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    .module-card.selected { border-color: var(--accent); }
+    .module-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 600;
+    }
+    .muted { color: var(--muted); }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #252c3b;
+      color: var(--text);
+    }
+    .tag.good { background: rgba(60, 209, 141, 0.16); color: var(--good); }
+    .tag.warn { background: rgba(245, 185, 93, 0.16); color: var(--warn); }
+    .tag.bad { background: rgba(255, 107, 114, 0.16); color: var(--bad); }
+    .command-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button {
+      border: 1px solid var(--border);
+      background: #1c2330;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #08111d; border-color: var(--accent); }
+    #chartWrap {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
+      min-height: 0;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      min-height: 420px;
+      display: block;
+      background: #0b0f14;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .spacer { flex: 1; }
+    .small { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>SCP Manager</h1>
+      <div id="status">Connecting</div>
+    </div>
+    <div id="health" class="muted small"></div>
+  </header>
+  <main>
+    <aside>
+      <div class="row">
+        <strong>Modules</strong>
+        <span class="spacer"></span>
+        <span id="moduleCount" class="muted small">0</span>
+      </div>
+      <div id="moduleList" style="margin-top:12px;"></div>
+    </aside>
+    <section>
+      <div class="panel">
+        <div class="row">
+          <strong id="selectedTitle">No module selected</strong>
+          <span class="spacer"></span>
+          <span id="selectedMeta" class="muted small"></span>
+        </div>
+        <div id="commandPanel" class="command-row"></div>
+      </div>
+      <div class="panel" id="liveSummary"></div>
+      <div id="chartWrap">
+        <div class="row">
+          <strong>Live pressure chart</strong>
+          <span id="chartHint" class="muted small"></span>
+        </div>
+        <canvas id="chart" width="1400" height="520"></canvas>
+      </div>
+    </section>
+  </main>
+  <script>
+    const statusEl = document.getElementById("status");
+    const healthEl = document.getElementById("health");
+    const moduleListEl = document.getElementById("moduleList");
+    const moduleCountEl = document.getElementById("moduleCount");
+    const selectedTitleEl = document.getElementById("selectedTitle");
+    const selectedMetaEl = document.getElementById("selectedMeta");
+    const commandPanelEl = document.getElementById("commandPanel");
+    const liveSummaryEl = document.getElementById("liveSummary");
+    const chartHintEl = document.getElementById("chartHint");
+    const canvas = document.getElementById("chart");
+    const ctx = canvas.getContext("2d");
+
+    const modules = new Map();
+    const histories = new Map();
+    const displayUnits = new Map();
+    let selectedModuleId = null;
+    let commandPanelRenderKey = null;
+    let requestSeq = 1;
+    let ws = null;
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function formatValue(value) {
+      if (value === null || value === undefined) return "-";
+      const abs = Math.abs(value);
+      if (abs > 0 && (abs < 0.001 || abs >= 1000)) {
+        return value.toExponential(2);
+      }
+      return value.toFixed(3);
+    }
+
+    function moduleTag(module) {
+      if (!module.online) return '<span class="tag bad">offline</span>';
+      if (module.state === "fault") return '<span class="tag warn">fault</span>';
+      return '<span class="tag good">online</span>';
+    }
+
+    function moduleSummary(module) {
+      if (module.kind === "pressure") {
+        return `pressure ${formatValue(module.last_pressure_value)} ${module.last_pressure_unit || "torr"}`;
+      }
+      if (module.kind === "control" && module.last_switch_value !== null && module.last_switch_value !== undefined) {
+        return `switch ${module.last_switch_value ? "on" : "off"}`;
+      }
+      if (module.kind === "power") {
+        return `power ${formatValue(module.last_power_value)} ${module.last_power_unit || "watts"}`;
+      }
+      return module.last_event ? `event ${module.last_event}` : "idle";
+    }
+
+    function renderModules() {
+      const list = Array.from(modules.values()).sort((a, b) => a.module_id - b.module_id);
+      moduleCountEl.textContent = `${list.length} modules`;
+      moduleListEl.innerHTML = list.map((module) => `
+        <div class="module-card ${module.module_id === selectedModuleId ? "selected" : ""}" data-id="${module.module_id}">
+          <div class="module-title">
+            <span>${module.name}</span>
+            ${moduleTag(module)}
+          </div>
+          <div class="muted small">ID ${module.module_id} | ${module.kind}</div>
+          <div class="small">${moduleSummary(module)}</div>
+        </div>
+      `).join("");
+    }
+
+    function selectModule(moduleId) {
+      if (selectedModuleId === moduleId) {
+        return;
+      }
+      selectedModuleId = moduleId;
+      renderModules();
+      renderSelected();
+      drawChart();
+    }
+
+    function renderSelected() {
+      const module = modules.get(selectedModuleId);
+      if (!module) {
+        selectedTitleEl.textContent = "No module selected";
+        selectedMetaEl.textContent = "";
+        commandPanelRenderKey = null;
+        commandPanelEl.innerHTML = "";
+        liveSummaryEl.textContent = "";
+        chartHintEl.textContent = "";
+        return;
+      }
+      selectedTitleEl.textContent = module.name;
+      selectedMetaEl.textContent = `ID ${module.module_id} | ${module.kind} | ${module.online ? "online" : "offline"}`;
+      liveSummaryEl.innerHTML = `
+        <div class="row">
+          <span class="tag ${module.online ? "good" : "bad"}">${module.online ? "online" : "offline"}</span>
+          <span class="tag">${module.state}</span>
+          <span class="muted small">last heartbeat ${module.last_heartbeat_ms || "-"}</span>
+        </div>
+        <div class="small" style="margin-top:8px;">${moduleSummary(module)}</div>
+      `;
+
+      renderCommandPanel(module);
+
+      const history = histories.get(module.module_id) || [];
+      const pressureSamples = history.filter((sample) => sample.type === "pressure_sample");
+      chartHintEl.textContent = module.kind === "pressure"
+        ? `${pressureSamples.length} pressure samples | log scale`
+        : `${history.length} samples`;
+    }
+
+    function renderCommandPanel(module) {
+      const commands = module.supported_commands || [];
+      const renderKey = `${module.module_id}:${commands.join(",")}`;
+      if (commandPanelRenderKey === renderKey) {
+        updateDisplayUnitButtons(displayUnits.get(module.module_id) || "torr");
+        updateSwitchButtons(module.last_switch_value);
+        return;
+      }
+
+      commandPanelRenderKey = renderKey;
+      commandPanelEl.innerHTML = "";
+      let commandAdded = false;
+      if (commands.includes("set_display_unit")) {
+        const activeUnit = displayUnits.get(module.module_id) || "torr";
+        for (const unit of ["torr", "bar", "voltage"]) {
+          const button = document.createElement("button");
+          button.textContent = unit;
+          button.dataset.displayUnit = unit;
+          button.className = unit === activeUnit ? "primary" : "";
+          button.addEventListener("click", () => {
+            displayUnits.set(module.module_id, unit);
+            updateDisplayUnitButtons(unit);
+            if (sendCommand(module.module_id, "set_display_unit", { unit })) {
+              setStatus(`Display unit set to ${unit}`);
+            }
+          });
+          commandPanelEl.appendChild(button);
+        }
+        commandAdded = true;
+      }
+      if (commands.includes("set_switch")) {
+        for (const [label, enabled] of [["Turn on", true], ["Turn off", false]]) {
+          const button = document.createElement("button");
+          button.textContent = label;
+          button.dataset.switchValue = enabled ? "true" : "false";
+          button.className = module.last_switch_value === enabled ? "primary" : "";
+          button.addEventListener("click", () => {
+            updateSwitchButtons(enabled);
+            if (sendCommand(module.module_id, "set_switch", { enabled })) {
+              setStatus(`Switch set ${enabled ? "on" : "off"}`);
+            }
+          });
+          commandPanelEl.appendChild(button);
+        }
+        commandAdded = true;
+      }
+      if (!commandAdded) {
+        const span = document.createElement("span");
+        span.className = "muted small";
+        span.textContent = "No web commands registered for this module.";
+        commandPanelEl.appendChild(span);
+      }
+    }
+
+    function updateDisplayUnitButtons(activeUnit) {
+      commandPanelEl.querySelectorAll("button[data-display-unit]").forEach((button) => {
+        button.classList.toggle("primary", button.dataset.displayUnit === activeUnit);
+      });
+    }
+
+    function updateSwitchButtons(activeValue) {
+      commandPanelEl.querySelectorAll("button[data-switch-value]").forEach((button) => {
+        button.classList.toggle("primary", String(activeValue) === button.dataset.switchValue);
+      });
+    }
+
+    function formatPressureTick(logValue, unit) {
+      const exponent = Math.round(logValue);
+      if (Math.abs(logValue - exponent) < 0.001) {
+        return `1e${exponent} ${unit}`;
+      }
+      return `${formatValue(Math.pow(10, logValue))} ${unit}`;
+    }
+
+    function drawChart() {
+      const module = modules.get(selectedModuleId);
+      const history = histories.get(selectedModuleId) || [];
+      const dpr = window.devicePixelRatio || 1;
+      const cssWidth = canvas.clientWidth || 1400;
+      const cssHeight = canvas.clientHeight || 520;
+      canvas.width = Math.floor(cssWidth * dpr);
+      canvas.height = Math.floor(cssHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
+      ctx.fillStyle = "#0b0f14";
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
+      ctx.strokeStyle = "#2a3140";
+      ctx.lineWidth = 1;
+
+      if (!module || module.kind !== "pressure") {
+        ctx.fillStyle = "#9aa6b2";
+        ctx.font = "14px system-ui";
+        ctx.fillText("Select a pressure module to see the live chart.", 20, 30);
+        return;
+      }
+
+      const pressureHistory = history.filter((sample) =>
+        sample.type === "pressure_sample"
+          && Number.isFinite(sample.value)
+          && sample.value > 0
+      );
+
+      if (pressureHistory.length < 2) {
+        ctx.fillStyle = "#9aa6b2";
+        ctx.font = "14px system-ui";
+        ctx.fillText("Waiting for pressure samples.", 20, 30);
+        return;
+      }
+
+      const left = 96;
+      const right = 20;
+      const top = 20;
+      const bottom = 36;
+      const plotW = cssWidth - left - right;
+      const plotH = cssHeight - top - bottom;
+      const values = pressureHistory.map((sample) => Math.log10(sample.value));
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const pad = Math.max(0.5, (max - min) * 0.1);
+      const lo = min - pad;
+      const hi = max + pad;
+      const unit = pressureHistory[pressureHistory.length - 1].unit || "torr";
+
+      ctx.strokeStyle = "#22304a";
+      ctx.fillStyle = "#9aa6b2";
+      ctx.font = "12px system-ui";
+      ctx.textAlign = "right";
+      for (let i = 0; i <= 4; i += 1) {
+        const y = top + (plotH * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(left, y);
+        ctx.lineTo(cssWidth - right, y);
+        ctx.stroke();
+        const labelValue = hi - ((hi - lo) * i) / 4;
+        ctx.fillText(formatPressureTick(labelValue, unit), left - 8, y + 4);
+      }
+      ctx.textAlign = "left";
+
+      ctx.strokeStyle = "#5aa9ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      pressureHistory.forEach((sample, index) => {
+        const x = left + (plotW * index) / (pressureHistory.length - 1);
+        const yValue = Math.log10(sample.value);
+        const y = top + (hi - yValue) * plotH / (hi - lo);
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      const last = pressureHistory[pressureHistory.length - 1];
+      ctx.fillStyle = "#e7edf7";
+      ctx.fillText(`${module.name} ${formatValue(last.value)} ${last.unit} (log scale)`, left, cssHeight - 12);
+    }
+
+    function updateHistory(moduleId, sample) {
+      const history = histories.get(moduleId) || [];
+      history.push(sample);
+      while (history.length > 300) history.shift();
+      histories.set(moduleId, history);
+    }
+
+    function mergeModuleList(modulesArray) {
+      for (const module of modulesArray) {
+        modules.set(module.module_id, module);
+      }
+      if (selectedModuleId === null) {
+        const firstPressure = Array.from(modules.values()).find((module) => module.kind === "pressure");
+        selectedModuleId = firstPressure ? firstPressure.module_id : (modulesArray[0] ? modulesArray[0].module_id : null);
+      }
+      renderModules();
+      renderSelected();
+      drawChart();
+    }
+
+    function sendCommand(moduleId, command, payload) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setStatus("WebSocket disconnected");
+        return false;
+      }
+      ws.send(JSON.stringify({
+        type: "command",
+        request_id: requestSeq++,
+        target_module_id: moduleId,
+        command,
+        payload,
+      }));
+      return true;
+    }
+
+    function connect() {
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${scheme}://${location.host}/ws`);
+      ws.addEventListener("open", () => {
+        setStatus("WebSocket connected");
+        ws.send(JSON.stringify({ type: "subscribe", modules: "all" }));
+      });
+      ws.addEventListener("close", () => {
+        setStatus("WebSocket disconnected, retrying");
+        setTimeout(connect, 1000);
+      });
+      ws.addEventListener("error", () => {
+        setStatus("WebSocket error");
+      });
+      ws.addEventListener("message", (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === "module_list") {
+          healthEl.textContent = `online ${message.health.online_count} / ${message.health.module_count}`;
+          mergeModuleList(message.modules);
+          return;
+        }
+        if (message.type === "history") {
+          histories.set(message.module_id, message.samples || []);
+          if (message.module_id === selectedModuleId) {
+            renderSelected();
+            drawChart();
+          }
+          return;
+        }
+        if (message.type === "module_state") {
+          modules.set(message.module.module_id, message.module);
+          renderModules();
+          renderSelected();
+          drawChart();
+          return;
+        }
+        if (message.type === "pressure_sample" || message.type === "power_sample") {
+          updateHistory(message.module_id, message);
+          modules.set(message.module_id, Object.assign({}, modules.get(message.module_id) || {}, {
+            last_pressure_value: message.type === "pressure_sample" ? message.value : modules.get(message.module_id)?.last_pressure_value,
+            last_pressure_unit: message.type === "pressure_sample" ? message.unit : modules.get(message.module_id)?.last_pressure_unit,
+            last_power_value: message.type === "power_sample" ? message.value : modules.get(message.module_id)?.last_power_value,
+            last_power_unit: message.type === "power_sample" ? message.unit : modules.get(message.module_id)?.last_power_unit,
+          }));
+          if (message.module_id === selectedModuleId) {
+            renderSelected();
+            drawChart();
+          } else {
+            renderModules();
+          }
+          return;
+        }
+        if (message.type === "command_result") {
+          healthEl.textContent = `command ${message.status} for module ${message.target_module_id}`;
+          return;
+        }
+      });
+    }
+
+    moduleListEl.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      const card = event.target.closest(".module-card");
+      if (!card || !moduleListEl.contains(card)) {
+        return;
+      }
+      selectModule(Number(card.dataset.id));
+    });
+
+    window.addEventListener("resize", drawChart);
+    connect();
+  </script>
+</body>
+</html>
