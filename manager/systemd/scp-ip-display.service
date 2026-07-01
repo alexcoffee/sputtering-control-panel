@@ -1,0 +1,22 @@
+[Unit]
+Description=SCP Pi Zero IP Display Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/jar
+Environment="SCP_DISPLAY_SPI_DEVICE=/dev/spidev0.0"
+Environment="SCP_DISPLAY_DC_GPIO=25"
+Environment="SCP_DISPLAY_RESET_GPIO=24"
+Environment="SCP_DISPLAY_BACKLIGHT_GPIO=23"
+Environment="SCP_DISPLAY_X_OFFSET=52"
+Environment="SCP_DISPLAY_Y_OFFSET=40"
+EnvironmentFile=-/etc/default/scp-ip-display
+ExecStart=/usr/bin/python3 -m manager.scp_manager.ip_display
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

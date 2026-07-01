@@ -5,3 +5,4 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 rsync -av --delete manager pi@jar:/home/pi/jar/
 ssh pi@jar 'sudo systemctl restart scp-manager && systemctl is-active scp-manager'
+ssh pi@jar 'sudo systemctl restart scp-ip-display && systemctl is-active scp-ip-display'

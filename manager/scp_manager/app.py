@@ -182,7 +182,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--can-interface", default="mock", help="Linux CAN interface name or 'mock'")
-    parser.add_argument("--spi-device", default=None, help="SPI device path such as /dev/spidev0.0")
+    parser.add_argument("--spi-device", default=None, help="SPI device path such as /dev/spidev1.0")
     parser.add_argument("--log-level", default="INFO", help="Python logging level")
     return parser.parse_args()
 
